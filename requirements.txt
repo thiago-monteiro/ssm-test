@@ -3,3 +3,13 @@ numpy>=1.24.0
 scipy>=1.10.0
 matplotlib>=3.7.0
 pandas>=2.0.0
+pytest==8.4.2
+PyYAML==6.0.3
+huggingface-hub==0.25.2
+transformers==4.45.2
+peft==0.13.2
+datasets==3.0.1
+tqdm==4.70.0
+einops==0.8.0
+causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.4.0/causal_conv1d-1.4.0%2Bcu122torch2.4cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+mamba-ssm @ https://github.com/state-spaces/mamba/releases/download/v2.2.4/mamba_ssm-2.2.4%2Bcu12torch2.4cxx11abiFALSE-cp311-cp311-linux_x86_64.whl

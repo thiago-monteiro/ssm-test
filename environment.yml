@@ -1,0 +1,14 @@
+name: ssm-test-plan
+channels:
+  - nvidia
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch=2.4.1
+  - pytorch-cuda=12.1
+  - gcc_linux-64
+  - gxx_linux-64
+  - pip:
+      - -r requirements.txt
