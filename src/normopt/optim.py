@@ -98,8 +98,8 @@ class MuonMomentum(MatrixUpdateRule):
         if buf is None:
             buf = state["momentum_buffer"] = torch.zeros_like(g)
         new_buf = buf.mul(momentum).add_(g)
-        if not update_state:
-            buf.sub_(g).div_(max(momentum, EPS))
+        if update_state:
+            state["momentum_buffer"] = new_buf
         raw = g.add(new_buf, alpha=momentum) if group["nesterov"] else new_buf.clone()
         ortho = zeropower_via_newtonschulz5(
             raw, steps=int(group["ns_steps"]), dtype=self.ns_dtype
@@ -185,7 +185,7 @@ class HybridOptimizer:
         for name, p in zip(self.names, params, strict=True):
             if p.grad is None:
                 continue
-            out[name] = self.main.compute_update(p).detach().clone()
+            out[name] = self.main.peek_update(p).detach().clone()
         return out
 
     def step(self) -> None:
@@ -229,8 +229,8 @@ class TangentRowMomentum(MatrixUpdateRule):
         if buf is None:
             buf = state["momentum_buffer"] = torch.zeros_like(g)
         new_buf = buf.mul(momentum).add_(g)
-        if not update_state:
-            buf.sub_(g).div_(max(momentum, EPS))
+        if update_state:
+            state["momentum_buffer"] = new_buf
         raw = g.add(new_buf, alpha=momentum) if group["nesterov"] else new_buf.clone()
         if group["tangential"]:
             w = p.detach()

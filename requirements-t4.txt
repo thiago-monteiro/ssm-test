@@ -1,0 +1,7 @@
+# Use scripts/setup_colab_t4.py to install CUDA PyTorch and matching binary kernels.
+torch==2.6.0
+transformers==4.45.2
+huggingface-hub==0.25.2
+numpy>=1.24.0
+einops==0.8.0
+packaging>=24.0
