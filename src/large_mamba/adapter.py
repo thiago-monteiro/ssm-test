@@ -18,11 +18,12 @@ def _linear_without_bias(module: nn.Module, inputs: torch.Tensor) -> torch.Tenso
     return F.linear(inputs, module.weight, None)
 
 
-def _causal_convolution(mixer: nn.Module, inputs: torch.Tensor, length: int) -> torch.Tensor:
-    pass
+def _causal_convolution(
+    mixer: nn.Module, inputs: torch.Tensor, length: int
+) -> torch.Tensor:
     if inputs.is_cuda:
-        from einops import rearrange
         from causal_conv1d import causal_conv1d_fn
+        from einops import rearrange
 
         return causal_conv1d_fn(
             x=inputs,
@@ -34,8 +35,6 @@ def _causal_convolution(mixer: nn.Module, inputs: torch.Tensor, length: int) -> 
 
 
 class FusedScanMambaMixer(nn.Module):
-    pass
-
     def __init__(self, base_mixer: nn.Module) -> None:
         super().__init__()
         self.base = base_mixer
@@ -44,7 +43,9 @@ class FusedScanMambaMixer(nn.Module):
     def layer_idx(self) -> int | None:
         return getattr(self.base, "layer_idx", None)
 
-    def forward(self, hidden_states: torch.Tensor, inference_params=None) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, inference_params=None
+    ) -> torch.Tensor:
         if inference_params is not None:
             raise NotImplementedError("training mixer expects full sequences")
         from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
@@ -55,7 +56,9 @@ class FusedScanMambaMixer(nn.Module):
         x, z = xz.chunk(2, dim=1)
         x = _causal_convolution(mixer, x, length)
         x_dbl = mixer.x_proj(x.transpose(1, 2).reshape(batch * length, -1))
-        dt, B, C = torch.split(x_dbl, [mixer.dt_rank, mixer.d_state, mixer.d_state], dim=-1)
+        dt, B, C = torch.split(
+            x_dbl, [mixer.dt_rank, mixer.d_state, mixer.d_state], dim=-1
+        )
         dt = _linear_without_bias(mixer.dt_proj, dt)
         dt = dt.reshape(batch, length, mixer.d_inner).transpose(1, 2).contiguous()
         B = B.reshape(batch, length, mixer.d_state).transpose(1, 2).contiguous()
@@ -75,15 +78,13 @@ class FusedScanMambaMixer(nn.Module):
 
 
 class ProjectedMambaMixer(nn.Module):
-    pass
-
     def __init__(
         self,
         base_mixer: nn.Module,
         *,
         condition: Condition | str,
         radius: float,
-        epsilon: float = 1e-6,
+        epsilon: float = 1e-06,
         alpha: float = 1.0,
         scan_chunk_size: int = 4,
         compile_scan: bool = False,
@@ -96,7 +97,8 @@ class ProjectedMambaMixer(nn.Module):
         self.alpha = alpha
         radius_device = getattr(base_mixer, "A_log").device
         self.register_buffer(
-            "radius", torch.tensor(float(radius), dtype=torch.float32, device=radius_device)
+            "radius",
+            torch.tensor(float(radius), dtype=torch.float32, device=radius_device),
         )
         self.capture_states = False
         self.capture_steps: set[int] = set()
@@ -135,22 +137,32 @@ class ProjectedMambaMixer(nn.Module):
             raise ValueError("calibrated radius must be positive")
         self.radius.fill_(float(radius))
 
-    def forward(self, hidden_states: torch.Tensor, inference_params=None) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, inference_params=None
+    ) -> torch.Tensor:
         if inference_params is not None:
-            raise NotImplementedError("instrumented layers require full-sequence reference recurrence")
+            raise NotImplementedError(
+                "instrumented layers require full-sequence reference recurrence"
+            )
         batch, length, _ = hidden_states.shape
         mixer = self.base
         xz = mixer.in_proj(hidden_states).transpose(1, 2)
         x, z = xz.chunk(2, dim=1)
         x = _causal_convolution(mixer, x, length)
         x_dbl = mixer.x_proj(x.transpose(1, 2).reshape(batch * length, -1))
-        dt, B, C = torch.split(x_dbl, [mixer.dt_rank, mixer.d_state, mixer.d_state], dim=-1)
+        dt, B, C = torch.split(
+            x_dbl, [mixer.dt_rank, mixer.d_state, mixer.d_state], dim=-1
+        )
         dt = _linear_without_bias(mixer.dt_proj, dt)
         dt = dt.reshape(batch, length, mixer.d_inner).transpose(1, 2).contiguous()
         B = B.reshape(batch, length, mixer.d_state).transpose(1, 2).contiguous()
         C = C.reshape(batch, length, mixer.d_state).transpose(1, 2).contiguous()
         A = -torch.exp(mixer.A_log.float())
-        use_reference = self.capture_states or bool(self.capture_steps) or self.state_transform is not None
+        use_reference = (
+            self.capture_states
+            or bool(self.capture_steps)
+            or self.state_transform is not None
+        )
         if use_reference:
             self.captured_states.clear()
 
@@ -202,16 +214,17 @@ def instrument_model(
     radii: dict[int, float],
     condition: Condition | str,
     *,
-    epsilon: float = 1e-6,
+    epsilon: float = 1e-06,
     scan_chunk_size: int = 4,
     compile_scan: bool = False,
     checkpoint_scan_chunks: bool = False,
 ) -> list[ProjectedMambaMixer]:
-    pass
     try:
         layers = model.backbone.layers
     except AttributeError as exc:
-        raise TypeError("expected an official MambaLMHeadModel with backbone.layers") from exc
+        raise TypeError(
+            "expected an official MambaLMHeadModel with backbone.layers"
+        ) from exc
     adapters: list[ProjectedMambaMixer] = []
     for index in layer_indices:
         if index not in radii:
@@ -232,12 +245,15 @@ def instrument_model(
     return adapters
 
 
-def make_remaining_mixers_lora_compatible(model: nn.Module) -> list[FusedScanMambaMixer]:
-    pass
+def make_remaining_mixers_lora_compatible(
+    model: nn.Module,
+) -> list[FusedScanMambaMixer]:
     try:
         layers = model.backbone.layers
     except AttributeError as exc:
-        raise TypeError("expected an official MambaLMHeadModel with backbone.layers") from exc
+        raise TypeError(
+            "expected an official MambaLMHeadModel with backbone.layers"
+        ) from exc
     wrappers: list[FusedScanMambaMixer] = []
     for layer in layers:
         if isinstance(layer.mixer, ProjectedMambaMixer):
@@ -258,15 +274,18 @@ def set_projection_strength(model: nn.Module, alpha: float) -> None:
 
 
 class FixedRowGain(nn.Module):
-    pass
-
     def __init__(self, weight: torch.Tensor, epsilon: float = 1e-12) -> None:
         super().__init__()
         self.epsilon = epsilon
-        self.register_buffer("gain", torch.linalg.vector_norm(weight.detach().float(), dim=1, keepdim=True))
+        self.register_buffer(
+            "gain",
+            torch.linalg.vector_norm(weight.detach().float(), dim=1, keepdim=True),
+        )
 
     def forward(self, direction: torch.Tensor) -> torch.Tensor:
-        norm = torch.linalg.vector_norm(direction.float(), dim=1, keepdim=True).clamp_min(self.epsilon)
+        norm = torch.linalg.vector_norm(
+            direction.float(), dim=1, keepdim=True
+        ).clamp_min(self.epsilon)
         return (direction.float() * (self.gain / norm)).to(direction.dtype)
 
 
@@ -274,4 +293,6 @@ def apply_fixed_row_gain(linears: Iterable[nn.Linear]) -> None:
     from torch.nn.utils import parametrize
 
     for linear in linears:
-        parametrize.register_parametrization(linear, "weight", FixedRowGain(linear.weight))
+        parametrize.register_parametrization(
+            linear, "weight", FixedRowGain(linear.weight)
+        )

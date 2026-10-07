@@ -19,7 +19,6 @@ class FaithfulnessMetrics:
 
 
 def tangent_directions(state: torch.Tensor, directions: torch.Tensor) -> torch.Tensor:
-    pass
     state_flat = state.float().flatten()
     state_unit = state_flat / state_flat.norm().clamp_min(1e-12)
     direction_flat = directions.float().flatten(start_dim=1)
@@ -29,39 +28,37 @@ def tangent_directions(state: torch.Tensor, directions: torch.Tensor) -> torch.T
 
 
 def perturb_state(
-    state: torch.Tensor,
-    directions: torch.Tensor,
-    theta: float,
-    *,
-    spherical: bool,
+    state: torch.Tensor, directions: torch.Tensor, theta: float, *, spherical: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    pass
     expanded = state.unsqueeze(0).expand_as(directions)
     if spherical:
         tangent = tangent_directions(state, directions)
-        perturbed = math.cos(theta) * expanded + math.sin(theta) * state.norm() * tangent
+        perturbed = (
+            math.cos(theta) * expanded + math.sin(theta) * state.norm() * tangent
+        )
     else:
         flat_norm = directions.flatten(start_dim=1).norm(dim=1).clamp_min(1e-12)
         norm_shape = (-1,) + (1,) * (directions.ndim - 1)
         unit = directions / flat_norm.view(norm_shape)
         perturbed = expanded + theta * state.norm() * unit
-    return perturbed, perturbed - expanded
+    return (perturbed, perturbed - expanded)
 
 
-def faithfulness_metrics(predicted: torch.Tensor, actual: torch.Tensor) -> FaithfulnessMetrics:
-    pass
+def faithfulness_metrics(
+    predicted: torch.Tensor, actual: torch.Tensor
+) -> FaithfulnessMetrics:
     predicted = predicted.detach().float()
     actual = actual.detach().float()
     if predicted.shape != actual.shape or predicted.ndim not in (1, 2):
         raise ValueError("effects need equal (pairs,) or (examples, directions) shape")
     if predicted.ndim == 1:
-        predicted, actual = predicted.unsqueeze(0), actual.unsqueeze(0)
+        predicted, actual = (predicted.unsqueeze(0), actual.unsqueeze(0))
     effective = actual.abs() >= actual.abs().median(dim=1, keepdim=True).values
-    error = (actual - predicted).abs() / (actual.abs() + 1e-6)
-    pred_eff, actual_eff = predicted[effective], actual[effective]
+    error = (actual - predicted).abs() / (actual.abs() + 1e-06)
+    pred_eff, actual_eff = (predicted[effective], actual[effective])
     if actual_eff.numel() == 0:
         raise ValueError("no effective perturbation directions")
-    pred_abs, actual_abs = pred_eff.abs(), actual_eff.abs()
+    pred_abs, actual_abs = (pred_eff.abs(), actual_eff.abs())
     pred_quartiles = torch.quantile(pred_abs, torch.tensor([0.25, 0.75]))
     actual_quartiles = torch.quantile(actual_abs, torch.tensor([0.25, 0.75]))
     rank = float(spearmanr(pred_abs.cpu().numpy(), actual_abs.cpu().numpy()).statistic)
@@ -71,10 +68,14 @@ def faithfulness_metrics(predicted: torch.Tensor, actual: torch.Tensor) -> Faith
         rank_correlation=rank,
         sign_accuracy=float(pred_eff.sign().eq(actual_eff.sign()).float().mean()),
         false_positive_rate=float(
-            ((pred_abs >= pred_quartiles[1]) & (actual_abs <= actual_quartiles[0])).float().mean()
+            ((pred_abs >= pred_quartiles[1]) & (actual_abs <= actual_quartiles[0]))
+            .float()
+            .mean()
         ),
         false_negative_rate=float(
-            ((pred_abs <= pred_quartiles[0]) & (actual_abs >= actual_quartiles[1])).float().mean()
+            ((pred_abs <= pred_quartiles[0]) & (actual_abs >= actual_quartiles[1]))
+            .float()
+            .mean()
         ),
     )
 
@@ -85,9 +86,10 @@ def matched_additive_noise(
     *,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    pass
     variance = (quantized.float() - clean.float()).square().mean()
-    noise = torch.randn(clean.shape, generator=generator, device=clean.device, dtype=torch.float32)
+    noise = torch.randn(
+        clean.shape, generator=generator, device=clean.device, dtype=torch.float32
+    )
     return (clean.float() + noise * variance.sqrt()).to(clean.dtype)
 
 
@@ -95,10 +97,9 @@ def causal_pruning_recovery(
     state: torch.Tensor,
     gradient: torch.Tensor,
     score_fn: Callable[[torch.Tensor], torch.Tensor],
-    fractions: tuple[float, ...] = (0.01, 0.02, 0.05, 0.10, 0.20, 0.50, 1.0),
+    fractions: tuple[float, ...] = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0),
 ) -> dict[float, float]:
-    pass
-    flat_state, flat_gradient = state.flatten(), gradient.flatten()
+    flat_state, flat_gradient = (state.flatten(), gradient.flatten())
     order = flat_gradient.abs().argsort(descending=True)
     zero_score = score_fn(torch.zeros_like(state)).reshape(()).float()
     full_effect = score_fn(state).reshape(()).float() - zero_score

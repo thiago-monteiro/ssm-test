@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import Any
@@ -28,7 +27,7 @@ def train_ssm(
     d_model: int = 64,
     steps: int = 4000,
     batch_size: int = 64,
-    lr: float = 2e-3,
+    lr: float = 0.002,
     weight_decay: float = 0.01,
     grad_clip: float = 1.0,
     device: str | torch.device | None = None,
@@ -41,21 +40,22 @@ def train_ssm(
         device = "cuda" if torch.cuda.is_available() else "cpu"
     seed_everything(seed)
     device = torch.device(device)
-
     if not with_replacement and L > V:
         V = L * 2
-
     model = DiagonalSSM(
-        V=V, L_max=max(L, 256), d_model=d_model, k=k, mode=mode, n_layers=2,
+        V=V,
+        L_max=max(L, 256),
+        d_model=d_model,
+        k=k,
+        mode=mode,
+        n_layers=2,
         no_pos_embed=no_pos_embed,
     ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps)
-
     best_acc = -1.0
     best_state = None
     history: list[dict[str, float]] = []
-
     model.train()
     for step in range(1, steps + 1):
         if step < steps // 5:
@@ -64,8 +64,9 @@ def train_ssm(
             L_step = max(16, L // 2)
         else:
             L_step = L
-
-        batch = make_batch(batch_size, L_step, V=V, device=device, with_replacement=with_replacement)
+        batch = make_batch(
+            batch_size, L_step, V=V, device=device, with_replacement=with_replacement
+        )
         out = model(batch["input_ids"], batch["query_pos"])
         loss = F.cross_entropy(out["logits"], batch["target"])
         opt.zero_grad(set_to_none=True)
@@ -75,27 +76,24 @@ def train_ssm(
         opt.step()
         sched.step()
         model.row_normalize_weights_()
-
         if log_every and step % log_every == 0:
             with torch.no_grad():
                 pred = out["logits"].argmax(-1)
                 acc = (pred == batch["target"]).float().mean().item()
             print(
-                f"  [B seed={seed} mode={mode} L={L} k={k}] "
-                f"step {step}/{steps} loss={loss.item():.4f} acc={acc:.3f} L_step={L_step}",
+                f"  [B seed={seed} mode={mode} L={L} k={k}] step {step}/{steps} loss={loss.item():.4f} acc={acc:.3f} L_step={L_step}",
                 flush=True,
             )
-
         if eval_every and step % eval_every == 0:
             metrics = _quick_acc(model, L=L, V=V, device=device, n=512)
             history.append({"step": float(step), **metrics})
             if metrics["overall_acc"] > best_acc:
                 best_acc = metrics["overall_acc"]
-                best_state = {k_: v.detach().cpu().clone() for k_, v in model.state_dict().items()}
-
+                best_state = {
+                    k_: v.detach().cpu().clone() for k_, v in model.state_dict().items()
+                }
     if best_state is not None:
         model.load_state_dict(best_state)
-
     final = _quick_acc(model, L=L, V=V, device=device, n=1024)
     meta = {
         "seed": seed,
@@ -106,16 +104,12 @@ def train_ssm(
         "final_acc": final["overall_acc"],
         "history": history,
     }
-    return model, meta
+    return (model, meta)
 
 
 @torch.no_grad()
 def _quick_acc(
-    model: DiagonalSSM,
-    L: int,
-    V: int,
-    device: torch.device,
-    n: int = 512,
+    model: DiagonalSSM, L: int, V: int, device: torch.device, n: int = 512
 ) -> dict[str, float]:
     model.eval()
     batch = make_batch(n, L, V=V, device=device)
@@ -138,11 +132,11 @@ def _over_smoothing(states: torch.Tensor, use_raw: bool = True) -> float:
     iu = torch.triu_indices(L, L, offset=1)
     vals = sim[:, iu[0], iu[1]]
     return float(vals.mean().item())
+
+
 @torch.no_grad()
 def _task_conditioned_os(
-    states: torch.Tensor,
-    target_positions: torch.Tensor,
-    n_pairs: int = 500,
+    states: torch.Tensor, target_positions: torch.Tensor, n_pairs: int = 500
 ) -> float:
     N, L, k = states.shape
     s = F.normalize(states, dim=-1)
@@ -156,11 +150,7 @@ def _task_conditioned_os(
 
 @torch.no_grad()
 def _intervention_drop(
-    model: DiagonalSSM,
-    L: int,
-    V: int,
-    device: torch.device,
-    n_sequences: int = 256,
+    model: DiagonalSSM, L: int, V: int, device: torch.device, n_sequences: int = 256
 ) -> float:
     model.eval()
     batch = make_batch(n_sequences, L, V=V, device=device)
@@ -171,9 +161,11 @@ def _intervention_drop(
     if states is None:
         return 0.0
     mean_state = states.mean(dim=1, keepdim=True)
-    mid_start, mid_end = L // 4, 3 * L // 4
+    mid_start, mid_end = (L // 4, 3 * L // 4)
     states_intervened = states.clone()
-    states_intervened[:, mid_start:mid_end] = mean_state.expand(-1, mid_end - mid_start, -1)
+    states_intervened[:, mid_start:mid_end] = mean_state.expand(
+        -1, mid_end - mid_start, -1
+    )
     Bsz, L_seq = batch["input_ids"].shape
     pos = torch.arange(L, device=device).unsqueeze(0).expand(Bsz, L)
     x = model.embed(batch["tokens"])
@@ -202,6 +194,8 @@ def _intervention_drop(
     pred_int = logits.argmax(-1)
     acc_int = (pred_int == batch["target"]).float().mean().item()
     return acc_clean - acc_int
+
+
 def eval_position(
     model: DiagonalSSM,
     seed: int,
@@ -216,7 +210,7 @@ def eval_position(
 ) -> dict[str, Any]:
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    seed_everything(seed + 20_000)
+    seed_everything(seed + 20000)
     device = torch.device(device)
     model = model.to(device)
     model.eval()
@@ -253,7 +247,7 @@ def eval_position(
                     all_labels.append(target.cpu())
                 remaining -= bs
     acc = (correct / total.clamp_min(1)).cpu().numpy()
-    a0, amid, alast = float(acc[0]), float(acc[L // 2]), float(acc[L - 1])
+    a0, amid, alast = (float(acc[0]), float(acc[L // 2]), float(acc[L - 1]))
     udepth = 0.5 * (a0 + alast) - amid
     udepth_abs = 0.5 * (a0 + alast) - float(acc[L // 4]) if L >= 4 else udepth
     endpoint = 0.5 * (a0 + alast)
@@ -267,7 +261,9 @@ def eval_position(
         cos_mat = rf @ rf.T
         n = cos_mat.shape[0]
         iu = torch.triu_indices(n, n, offset=1)
-        os_readout = float(cos_mat[iu[0], iu[1]].mean().item()) if n > 1 else float("nan")
+        os_readout = (
+            float(cos_mat[iu[0], iu[1]].mean().item()) if n > 1 else float("nan")
+        )
     else:
         os_score = float("nan")
         os_readout = float("nan")
@@ -277,7 +273,7 @@ def eval_position(
     if h_final_list:
         h = torch.cat(h_final_list, dim=0).to(device)
         p_clean = model.probe_products(h)
-        std = h.std().clamp_min(1e-6)
+        std = h.std().clamp_min(1e-06)
         noise = torch.randn_like(h) * (noise_sigma_frac * std)
         p_obs = model.probe_products(h + noise)
         snr = signal_noise_rho(p_clean, p_obs, max_coords=min(64, h.shape[1]))
@@ -320,7 +316,9 @@ def eval_position(
         result["intervention_drop"] = int_drop
     if do_task_os and states_list:
         states_all = torch.cat(states_list, dim=0).to(device)
-        pos_labels = torch.arange(L, device=device).unsqueeze(0).expand(states_all.shape[0], L)
+        pos_labels = (
+            torch.arange(L, device=device).unsqueeze(0).expand(states_all.shape[0], L)
+        )
         task_os = _task_conditioned_os(states_all, pos_labels)
         result["task_conditioned_os"] = task_os
     return result

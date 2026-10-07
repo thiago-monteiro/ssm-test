@@ -5,8 +5,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-EPS = 1e-8
-
+EPS = 1e-08
 HEAD_KEYS = ("head", "lm_head")
 ALWAYS_EXCLUDED_KEYS = ("embed", "pos_embed", "a_raw", "norm")
 
@@ -16,11 +15,11 @@ class NormalizationPolicy:
     weight_rows: bool = False
     state_sphere: bool = False
     include_head: bool = False
-    state_ramp_fraction: float = 0.10
+    state_ramp_fraction: float = 0.1
 
     @property
     def is_plain(self) -> bool:
-        return not self.weight_rows and not self.state_sphere
+        return not self.weight_rows and (not self.state_sphere)
 
     @property
     def label(self) -> str:
@@ -49,9 +48,9 @@ def iter_weight_row_targets(
         weight = module.weight
         if weight.ndim != 2 or not weight.requires_grad:
             continue
-        if any(key in name for key in ALWAYS_EXCLUDED_KEYS):
+        if any((key in name for key in ALWAYS_EXCLUDED_KEYS)):
             continue
-        if not include_head and any(key in name for key in HEAD_KEYS):
+        if not include_head and any((key in name for key in HEAD_KEYS)):
             continue
         targets.append((name + ".weight", weight))
     return targets
@@ -91,16 +90,16 @@ def normalize_state(h: torch.Tensor, strength: float, eps: float = EPS) -> torch
     return (1.0 - strength) * h + strength * unit
 
 
-def tangentialize(update: torch.Tensor, weight: torch.Tensor, eps: float = EPS) -> torch.Tensor:
+def tangentialize(
+    update: torch.Tensor, weight: torch.Tensor, eps: float = EPS
+) -> torch.Tensor:
     w_hat = weight / (weight.norm(dim=1, keepdim=True) + eps)
     radial = (update * w_hat).sum(dim=1, keepdim=True)
     return update - radial * w_hat
 
 
 def row_radial_fraction(
-    grads: dict[str, torch.Tensor],
-    weights: dict[str, torch.Tensor],
-    eps: float = EPS,
+    grads: dict[str, torch.Tensor], weights: dict[str, torch.Tensor], eps: float = EPS
 ) -> float:
     radial_sq = 0.0
     total_sq = 0.0
@@ -110,8 +109,8 @@ def row_radial_fraction(
             continue
         w_hat = w / (w.norm(dim=1, keepdim=True) + eps)
         radial = (g * w_hat).sum(dim=1, keepdim=True)
-        radial_sq += float((radial ** 2).sum().item())
-        total_sq += float((g ** 2).sum().item())
+        radial_sq += float((radial**2).sum().item())
+        total_sq += float((g**2).sum().item())
     if total_sq <= 0.0:
         return 0.0
     return radial_sq / total_sq

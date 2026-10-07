@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import multiprocessing as mp
@@ -14,7 +13,6 @@ def run_parallel(
 ) -> list[Any]:
     if n_workers is None or n_workers <= 1:
         return [worker_fn(t) for t in tasks]
-    
     n_workers = min(n_workers, len(tasks), os.cpu_count() or 4)
     ctx = mp.get_context("spawn")
     with ctx.Pool(n_workers) as pool:

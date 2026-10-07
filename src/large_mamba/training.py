@@ -16,12 +16,13 @@ from .data import batch_hash
 from .metrics import answer_token_loss
 from .modeling import trainable_state_dict
 
-
 BatchFactory = Callable[[int, int], dict[str, torch.Tensor]]
 
 
-def build_optimizer(model: torch.nn.Module, config: ExperimentConfig) -> torch.optim.Optimizer:
-    lora, recurrence = [], []
+def build_optimizer(
+    model: torch.nn.Module, config: ExperimentConfig
+) -> torch.optim.Optimizer:
+    lora, recurrence = ([], [])
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
@@ -35,7 +36,8 @@ def build_optimizer(model: torch.nn.Module, config: ExperimentConfig) -> torch.o
             {"params": recurrence, "lr": config.training.recurrence_learning_rate},
         ],
         weight_decay=config.training.weight_decay,
-        fused=bool(all_trainable) and all(parameter.device.type == "cuda" for parameter in all_trainable),
+        fused=bool(all_trainable)
+        and all((parameter.device.type == "cuda" for parameter in all_trainable)),
     )
 
 
@@ -57,7 +59,6 @@ def run_training(
     output_dir: str | Path,
     device: torch.device,
 ) -> dict[str, Any]:
-    pass
     config.validate()
     condition = Condition(condition)
     torch.manual_seed(seed)
@@ -80,7 +81,6 @@ def run_training(
     optimizer.zero_grad(set_to_none=True)
     if 0 in config.training.checkpoint_steps:
         torch.save(trainable_state_dict(model), output_dir / "checkpoint-0.pt")
-
     hash_file = hash_path.open("w")
     progress = tqdm(
         range(config.training.optimizer_steps),
@@ -94,7 +94,8 @@ def run_training(
                 set_projection_strength(
                     model,
                     projection_strength(
-                        step, config.training.optimizer_steps,
+                        step,
+                        config.training.optimizer_steps,
                         config.training.projection_ramp_fraction,
                     ),
                 )
@@ -106,18 +107,21 @@ def run_training(
                 labels = batch["labels"].to(device)
                 if input_ids.shape[0] != planned_batch_size:
                     raise ValueError(
-                        f"microbatch {micro} has {input_ids.shape[0]} examples; "
-                        f"expected {planned_batch_size}"
+                        f"microbatch {micro} has {input_ids.shape[0]} examples; expected {planned_batch_size}"
                     )
                 step_hashes.append(batch_hash(input_ids))
                 amp_enabled = device.type == "cuda"
-                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp_enabled):
+                with torch.autocast(
+                    device_type=device.type, dtype=torch.bfloat16, enabled=amp_enabled
+                ):
                     logits = model(input_ids).logits
                     loss = answer_token_loss(logits, labels) * (
                         planned_batch_size / config.training.effective_batch_size
                     )
                 if not torch.isfinite(loss):
-                    raise FloatingPointError(f"non-finite loss at optimizer step {step}")
+                    raise FloatingPointError(
+                        f"non-finite loss at optimizer step {step}"
+                    )
                 loss.backward()
                 loss_sum += float(loss.detach())
             gradient_norm = torch.nn.utils.clip_grad_norm_(
@@ -125,15 +129,28 @@ def run_training(
                 config.training.max_grad_norm,
             )
             if not torch.isfinite(gradient_norm):
-                raise FloatingPointError(f"non-finite gradient at optimizer step {step}")
+                raise FloatingPointError(
+                    f"non-finite gradient at optimizer step {step}"
+                )
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
-            hash_file.write(json.dumps({"step": step, "microbatch_hashes": step_hashes}) + "\n")
-            history.append({"step": step + 1, "loss": loss_sum, "gradient_norm": float(gradient_norm)})
+            hash_file.write(
+                json.dumps({"step": step, "microbatch_hashes": step_hashes}) + "\n"
+            )
+            history.append(
+                {
+                    "step": step + 1,
+                    "loss": loss_sum,
+                    "gradient_norm": float(gradient_norm),
+                }
+            )
             if step + 1 in config.training.checkpoint_steps:
-                torch.save(trainable_state_dict(model), output_dir / f"checkpoint-{step + 1}.pt")
-            step_elapsed = max(time.perf_counter() - start, 1e-9)
+                torch.save(
+                    trainable_state_dict(model),
+                    output_dir / f"checkpoint-{step + 1}.pt",
+                )
+            step_elapsed = max(time.perf_counter() - start, 1e-09)
             tokens_done = (
                 (step + 1)
                 * config.task.train_sequence_length
@@ -141,7 +158,8 @@ def run_training(
             )
             peak_gib = (
                 torch.cuda.max_memory_allocated(device) / 2**30
-                if device.type == "cuda" else 0.0
+                if device.type == "cuda"
+                else 0.0
             )
             progress.set_postfix(
                 loss=f"{loss_sum:.4f}",
@@ -152,9 +170,10 @@ def run_training(
     finally:
         progress.close()
         hash_file.close()
-
     elapsed = time.perf_counter() - start
-    peak_allocated = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+    peak_allocated = (
+        torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+    )
     processed_tokens = (
         config.task.train_sequence_length
         * config.training.effective_batch_size
@@ -176,4 +195,6 @@ def run_training(
 
 def assert_paired_hash_files(left: str | Path, right: str | Path) -> None:
     if Path(left).read_bytes() != Path(right).read_bytes():
-        raise AssertionError("paired conditions did not receive identical token batches")
+        raise AssertionError(
+            "paired conditions did not receive identical token batches"
+        )

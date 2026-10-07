@@ -4,19 +4,19 @@ import math
 from dataclasses import dataclass, replace
 
 import torch
-import torch.nn as nn
 
-from src.normopt.normalize import iter_weight_row_targets
-
-EPS = 1e-8
-OPTIMIZER_NAMES = ("sgdm", "adamw", "muon", "rmo")
+EPS = 1e-08
+OPTIMIZER_NAMES = ("sgdm", "adamw", "muon", "rmo", "gtmuon")
 SPECTRAL_NAMES = ("muon", "rmo")
 
 
 def zeropower_via_newtonschulz5(
-    G: torch.Tensor, steps: int = 5, eps: float = 1e-7, dtype: torch.dtype | None = None
+    G: torch.Tensor,
+    steps: int = 5,
+    eps: float = 1e-07,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    a, b, c = (3.4445, -4.7750, 2.0315)
+    a, b, c = (3.4445, -4.775, 2.0315)
     if dtype is None:
         dtype = torch.bfloat16 if G.is_cuda else torch.float32
     X = G.to(dtype)
@@ -34,11 +34,12 @@ def zeropower_via_newtonschulz5(
 
 
 class MatrixUpdateRule(torch.optim.Optimizer):
-
     def __init__(self, params, defaults: dict) -> None:
         super().__init__(params, defaults)
 
-    def compute_update(self, p: torch.Tensor, update_state: bool = True) -> torch.Tensor:
+    def compute_update(
+        self, p: torch.Tensor, update_state: bool = True
+    ) -> torch.Tensor:
         raise NotImplementedError
 
     @torch.no_grad()
@@ -64,7 +65,6 @@ class MatrixUpdateRule(torch.optim.Optimizer):
 
 
 class MuonMomentum(MatrixUpdateRule):
-
     def __init__(
         self,
         params,
@@ -88,7 +88,9 @@ class MuonMomentum(MatrixUpdateRule):
         self.ns_dtype = ns_dtype
 
     @torch.no_grad()
-    def compute_update(self, p: torch.Tensor, update_state: bool = True) -> torch.Tensor:
+    def compute_update(
+        self, p: torch.Tensor, update_state: bool = True
+    ) -> torch.Tensor:
         g = p.grad
         assert g is not None
         group = self.param_groups[0]
@@ -110,10 +112,9 @@ class MuonMomentum(MatrixUpdateRule):
 
 @dataclass(frozen=True)
 class OptimizerSpec:
-
     name: str
     lr: float
-    lr_rest: float = 3e-3
+    lr_rest: float = 0.003
     momentum: float = 0.95
     betas: tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.0
@@ -124,10 +125,12 @@ class OptimizerSpec:
 
     def __post_init__(self) -> None:
         if self.name not in OPTIMIZER_NAMES:
-            raise ValueError(f"unknown optimizer {self.name!r}, expected {OPTIMIZER_NAMES}")
+            raise ValueError(
+                f"unknown optimizer {self.name!r}, expected {OPTIMIZER_NAMES}"
+            )
 
     def resolved_ns_dtype(self, device: torch.device) -> torch.dtype | None:
-        if self.name != "muon":
+        if self.name not in ("muon", "gtmuon"):
             return None
         use_bf16 = self.ns_dtype == "auto" and device.type == "cuda"
         return torch.bfloat16 if use_bf16 else torch.float32
@@ -137,19 +140,20 @@ class OptimizerSpec:
 
 
 class HybridOptimizer:
-
     def __init__(
         self,
         main: MatrixUpdateRule,
         rest: torch.optim.Optimizer | None,
         names: list[str],
-        spec: OptimizerSpec,
+        spec: OptimizerSpec | None = None,
     ) -> None:
         self.main = main
         self.rest = rest
         self.names = names
         self.spec = spec
-        self._base_lrs = {id(g): g["lr"] for o in self.optimizers for g in o.param_groups}
+        self._base_lrs = {
+            id(g): g["lr"] for o in self.optimizers for g in o.param_groups
+        }
 
     @property
     def optimizers(self) -> list[torch.optim.Optimizer]:
@@ -195,7 +199,6 @@ class HybridOptimizer:
 
 
 class TangentRowMomentum(MatrixUpdateRule):
-
     def __init__(
         self,
         params,
@@ -219,7 +222,9 @@ class TangentRowMomentum(MatrixUpdateRule):
         )
 
     @torch.no_grad()
-    def compute_update(self, p: torch.Tensor, update_state: bool = True) -> torch.Tensor:
+    def compute_update(
+        self, p: torch.Tensor, update_state: bool = True
+    ) -> torch.Tensor:
         g = p.grad
         assert g is not None
         group = self.param_groups[0]
@@ -239,3 +244,80 @@ class TangentRowMomentum(MatrixUpdateRule):
         if group["unit_rows"]:
             raw = raw / (raw.norm(dim=1, keepdim=True) + EPS)
         return raw
+
+
+class GraftedTangentMuon(MatrixUpdateRule):
+    def __init__(
+        self,
+        params,
+        lr: float = 0.003,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_steps: int = 3,
+        ns_dtype: torch.dtype | None = None,
+        betas: tuple[float, float] = (0.9, 0.95),
+        eps: float = 1e-08,
+        tangential: bool = True,
+        weight_decay: float = 0.0,
+    ) -> None:
+        super().__init__(
+            params,
+            dict(
+                lr=lr,
+                momentum=momentum,
+                nesterov=nesterov,
+                ns_steps=ns_steps,
+                betas=betas,
+                eps=eps,
+                tangential=tangential,
+                weight_decay=weight_decay,
+            ),
+        )
+        self.ns_dtype = ns_dtype
+        self.betas = betas
+        self.eps = eps
+
+    @torch.no_grad()
+    def compute_update(
+        self, p: torch.Tensor, update_state: bool = True
+    ) -> torch.Tensor:
+        g = p.grad
+        assert g is not None
+        group = self.param_groups[0]
+        momentum = group["momentum"]
+        state = self.state[p]
+        buf = state.get("momentum_buffer")
+        if buf is None:
+            buf = state["momentum_buffer"] = torch.zeros_like(g)
+        new_buf = buf.mul(momentum).add_(g)
+        if update_state:
+            state["momentum_buffer"] = new_buf
+        raw = g.add(new_buf, alpha=momentum) if group["nesterov"] else new_buf.clone()
+        ortho = zeropower_via_newtonschulz5(
+            raw, steps=int(group["ns_steps"]), dtype=self.ns_dtype
+        )
+        if group["tangential"]:
+            w = p.detach()
+            w_hat = w / (w.norm(dim=1, keepdim=True) + EPS)
+            ortho = ortho - (ortho * w_hat).sum(dim=1, keepdim=True) * w_hat
+        m = state.get("adam_m")
+        v = state.get("adam_v")
+        if m is None:
+            m = state["adam_m"] = torch.zeros_like(g)
+            v = state["adam_v"] = torch.zeros_like(g)
+        b1, b2 = self.betas
+        if update_state:
+            m.mul_(b1).add_(g, alpha=1.0 - b1)
+            v.mul_(b2).addcmul_(g, g, value=1.0 - b2)
+            state["adam_step"] = state.get("adam_step", 0) + 1
+        else:
+            m = m * b1 + g * (1.0 - b1)
+            v = v * b2 + g * g * (1.0 - b2)
+        step_no = state.get("adam_step", 1)
+        m_hat = m / (1.0 - b1 ** max(1, step_no))
+        v_hat = v / (1.0 - b2 ** max(1, step_no))
+        adam_step = m_hat / (v_hat.sqrt() + self.eps)
+        graft = adam_step.norm(dim=1, keepdim=True).clamp_min(1e-12) / ortho.norm(
+            dim=1, keepdim=True
+        ).clamp_min(EPS)
+        return ortho * graft

@@ -6,8 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-EPS = 1e-8
+EPS = 1e-08
 
 
 class CopySSM(nn.Module):
@@ -28,14 +27,10 @@ class CopySSM(nn.Module):
         self.k = k
         self.n_layers = n_layers
         self.sphere = bool(sphere)
-
-
-
         self.embed = nn.Embedding(V + 1, d_model)
         self.pos_embed = nn.Embedding(L, d_model)
         nn.init.normal_(self.embed.weight, std=0.02)
         nn.init.normal_(self.pos_embed.weight, std=0.02)
-
         self.a_raw = nn.ParameterList()
         self.B = nn.ParameterList()
         self.C = nn.ParameterList()
@@ -45,7 +40,7 @@ class CopySSM(nn.Module):
             a = nn.Parameter(torch.zeros(k))
             with torch.no_grad():
                 target = -math.log(0.995)
-                a.fill_(math.log(math.expm1(max(target, 1e-4))))
+                a.fill_(math.log(math.expm1(max(target, 0.0001))))
             self.a_raw.append(a)
             Bm = nn.Parameter(torch.empty(k, d_model))
             Cm = nn.Parameter(torch.empty(d_model, k))
@@ -56,19 +51,15 @@ class CopySSM(nn.Module):
             self.layer_norm.append(nn.LayerNorm(d_model))
             self.out_proj.append(
                 nn.Sequential(
-                    nn.Linear(d_model, d_model),
-                    nn.GELU(),
-                    nn.Linear(d_model, d_model),
+                    nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, d_model)
                 )
             )
-
         self.head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model),
             nn.GELU(),
             nn.Linear(d_model, V),
         )
-
 
     def A_bar(self, layer: int) -> torch.Tensor:
         return torch.exp(-F.softplus(self.a_raw[layer]))
@@ -96,7 +87,6 @@ class CopySSM(nn.Module):
                 h_prev = self._project(h_prev)
                 steps.append(h_prev.unsqueeze(1))
             return torch.cat(steps, dim=1)
-
         h_prev = h_init
         out_steps = []
         for t in range(t0 + 1, Bu.shape[-2]):
@@ -106,8 +96,9 @@ class CopySSM(nn.Module):
             out_steps.append(h_prev.unsqueeze(-2))
         return torch.cat(out_steps, dim=-2)
 
-
-    def _body(self, x0: torch.Tensor, query_pos: torch.Tensor, return_all: bool = False):
+    def _body(
+        self, x0: torch.Tensor, query_pos: torch.Tensor, return_all: bool = False
+    ):
         Bsz, L, _ = x0.shape
         h_last = None
         layer_inputs = []
@@ -128,21 +119,14 @@ class CopySSM(nn.Module):
         x_q = x0.gather(1, idx_d).squeeze(1)
         feat = y_q + x_q
         logits = self.head(feat)
-        out: dict[str, torch.Tensor] = {
-            "logits": logits,
-            "h_q": h_q,
-            "x_q": x_q,
-        }
+        out: dict[str, torch.Tensor] = {"logits": logits, "h_q": h_q, "x_q": x_q}
         if return_all:
             out["h_last"] = h_last
             out["layer_inputs"] = layer_inputs
         return out
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        query_pos: torch.Tensor,
-        return_all: bool = False,
+        self, input_ids: torch.Tensor, query_pos: torch.Tensor, return_all: bool = False
     ) -> dict[str, torch.Tensor]:
         tokens = input_ids[:, :-1]
         Bsz, L = tokens.shape
@@ -150,20 +134,19 @@ class CopySSM(nn.Module):
         x0 = self.embed(tokens) + self.pos_embed(pos)
         return self._body(x0, query_pos, return_all=return_all)
 
-    def forward_x0(self, x0: torch.Tensor, query_pos: torch.Tensor, return_all: bool = False):
+    def forward_x0(
+        self, x0: torch.Tensor, query_pos: torch.Tensor, return_all: bool = False
+    ):
         return self._body(x0, query_pos, return_all=return_all)
 
-
-    def logits_from_final_state(self, h_prime: torch.Tensor, x_q: torch.Tensor) -> torch.Tensor:
+    def logits_from_final_state(
+        self, h_prime: torch.Tensor, x_q: torch.Tensor
+    ) -> torch.Tensor:
         y_q = F.linear(h_prime, self.C[self.n_layers - 1])
         return self.head(y_q + x_q)
 
     def tail_scan_to_q(
-        self,
-        x1_row: torch.Tensor,
-        t0: int,
-        h_init: torch.Tensor,
-        q: int,
+        self, x1_row: torch.Tensor, t0: int, h_init: torch.Tensor, q: int
     ) -> torch.Tensor:
         assert q > t0 >= 0
         states = self.scan(x1_row.unsqueeze(0), self.n_layers - 1, t0=t0, h_init=h_init)

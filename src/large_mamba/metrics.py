@@ -15,7 +15,6 @@ class AnswerMetrics:
 
 
 def answer_token_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    pass
     if logits.shape[:2] != labels.shape:
         raise ValueError("logit batch/sequence dimensions must match labels")
     return F.cross_entropy(
@@ -26,7 +25,7 @@ def answer_token_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tenso
 
 
 def answer_metrics(logits: torch.Tensor, labels: torch.Tensor) -> AnswerMetrics:
-    shifted_logits, shifted_labels = logits[:, :-1], labels[:, 1:]
+    shifted_logits, shifted_labels = (logits[:, :-1], labels[:, 1:])
     mask = shifted_labels.ne(-100)
     selected_logits = shifted_logits[mask]
     targets = shifted_labels[mask]
@@ -56,7 +55,9 @@ def symmetric_quantize_state(
 ) -> torch.Tensor:
     if bits not in (2, 4, 8):
         raise ValueError("state quantization sweep is fixed to 2, 4, and 8 bits")
-    max_value = torch.as_tensor(maximum, dtype=state.dtype, device=state.device).clamp_min(1e-12)
+    max_value = torch.as_tensor(
+        maximum, dtype=state.dtype, device=state.device
+    ).clamp_min(1e-12)
     qmax = 2 ** (bits - 1) - 1
     scale = max_value / qmax
     return (torch.round(state / scale).clamp(-qmax, qmax) * scale).to(state.dtype)

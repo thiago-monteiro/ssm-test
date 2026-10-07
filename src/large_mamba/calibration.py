@@ -15,7 +15,6 @@ def calibrate_radii(
     *,
     max_examples: int = 1024,
 ) -> dict[int, float]:
-    pass
     adapters = list(adapters)
     for adapter in adapters:
         adapter.capture_states = True
@@ -33,12 +32,18 @@ def calibrate_radii(
             for adapter in adapters:
                 if adapter.last_scan is None or adapter.last_scan.states is None:
                     raise RuntimeError("adapter did not capture recurrent states")
-                states = adapter.last_scan.states.permute(0, 2, 1, 3).flatten(start_dim=2)
-                norms[int(adapter.layer_idx)].append(torch.linalg.vector_norm(states.float(), dim=2).cpu())
+                states = adapter.last_scan.states.permute(0, 2, 1, 3).flatten(
+                    start_dim=2
+                )
+                norms[int(adapter.layer_idx)].append(
+                    torch.linalg.vector_norm(states.float(), dim=2).cpu()
+                )
                 adapter.last_scan = None
     finally:
         for adapter in adapters:
             adapter.capture_states = False
     if observed != max_examples:
-        raise ValueError(f"calibration supplied {observed} examples, expected {max_examples}")
+        raise ValueError(
+            f"calibration supplied {observed} examples, expected {max_examples}"
+        )
     return {layer: float(torch.cat(rows).median()) for layer, rows in norms.items()}

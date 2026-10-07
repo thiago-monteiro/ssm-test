@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import numpy as np
@@ -6,8 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-EPS = 1e-8
+EPS = 1e-08
 
 
 def mean_pairwise_corr(P: np.ndarray | torch.Tensor) -> float:
@@ -49,7 +47,6 @@ def signal_noise_rho(
         p_obs = p_obs.detach().cpu().float()
     else:
         p_obs = torch.as_tensor(p_obs, dtype=torch.float32)
-
     p_noise = p_obs - p_clean
     m = p_clean.shape[1]
     if max_coords is not None and m > max_coords:
@@ -58,19 +55,13 @@ def signal_noise_rho(
         idx = torch.randperm(m, generator=g)[:max_coords]
         p_clean = p_clean[:, idx]
         p_noise = p_noise[:, idx]
-
     rho_s = mean_pairwise_corr(p_clean)
     rho_n = mean_pairwise_corr(p_noise)
-    return {
-        "rho_signal": rho_s,
-        "rho_noise": rho_n,
-        "delta_rho": rho_s - rho_n,
-    }
+    return {"rho_signal": rho_s, "rho_noise": rho_n, "delta_rho": rho_s - rho_n}
 
 
 def effective_snr(
-    p_clean: torch.Tensor | np.ndarray,
-    p_obs: torch.Tensor | np.ndarray,
+    p_clean: torch.Tensor | np.ndarray, p_obs: torch.Tensor | np.ndarray
 ) -> dict[str, float]:
     if isinstance(p_clean, torch.Tensor):
         p_clean = p_clean.detach().cpu().float()
@@ -80,17 +71,13 @@ def effective_snr(
         p_obs = p_obs.detach().cpu().float()
     else:
         p_obs = torch.as_tensor(p_obs, dtype=torch.float32)
-
     p_noise = p_obs - p_clean
-    signal_pow = (p_clean ** 2).sum(dim=1).clamp_min(1e-12)
-    noise_pow = (p_noise ** 2).sum(dim=1).clamp_min(1e-12)
+    signal_pow = (p_clean**2).sum(dim=1).clamp_min(1e-12)
+    noise_pow = (p_noise**2).sum(dim=1).clamp_min(1e-12)
     snr_per_sample = (signal_pow / noise_pow).mean().item()
-
     align = F.cosine_similarity(
-        p_clean.mean(dim=0, keepdim=True),
-        p_obs.mean(dim=0, keepdim=True),
+        p_clean.mean(dim=0, keepdim=True), p_obs.mean(dim=0, keepdim=True)
     ).item()
-
     return {"snr_effective": snr_per_sample, "alignment": align}
 
 
@@ -107,6 +94,7 @@ def variance_fraction(
         p_noise = p_noise.detach().cpu().numpy()
     else:
         p_noise = np.asarray(p_noise, dtype=np.float64)
+
     def _top_var_fraction(X, k):
         if not np.isfinite(X).all():
             return 0.0
@@ -115,11 +103,12 @@ def variance_fraction(
             U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
         except np.linalg.LinAlgError:
             return 0.0
-        total_var = (S ** 2).sum()
+        total_var = (S**2).sum()
         if total_var < 1e-12:
             return 0.0
         top_var = (S[:k] ** 2).sum()
         return float(top_var / total_var)
+
     n_components = min(n_components, p_clean.shape[1], p_clean.shape[0] - 1)
     signal_frac = _top_var_fraction(p_clean, n_components)
     noise_frac = _top_var_fraction(p_noise, n_components)
@@ -128,13 +117,15 @@ def variance_fraction(
         "noise_topvar_frac": noise_frac,
         "var_ratio": signal_frac / max(noise_frac, 1e-12),
     }
+
+
 def train_decode_probe(
     h: torch.Tensor,
     labels: torch.Tensor,
     n_classes: int,
     device: torch.device,
     steps: int = 200,
-    lr: float = 1e-2,
+    lr: float = 0.01,
 ) -> tuple[float, nn.Linear]:
     h = h.detach().to(device).float()
     labels = labels.detach().to(device)
@@ -142,7 +133,7 @@ def train_decode_probe(
     probe = nn.Linear(D, n_classes).to(device)
     opt = torch.optim.AdamW(probe.parameters(), lr=lr)
     for _ in range(steps):
-        idx = torch.randperm(B, device=device)[:min(256, B)]
+        idx = torch.randperm(B, device=device)[: min(256, B)]
         logits = probe(h[idx])
         loss = F.cross_entropy(logits, labels[idx])
         opt.zero_grad(set_to_none=True)
@@ -151,7 +142,7 @@ def train_decode_probe(
     probe.eval()
     logits = probe(h)
     acc = (logits.argmax(-1) == labels).float().mean().item()
-    return acc, probe
+    return (acc, probe)
 
 
 def hypersphere(v: torch.Tensor, dim: int = -1, eps: float = EPS) -> torch.Tensor:
@@ -163,6 +154,8 @@ def row_normalize_(W: torch.Tensor, eps: float = EPS) -> torch.Tensor:
         return W
     W.data.div_(W.data.norm(dim=1, keepdim=True) + eps)
     return W
+
+
 def row_normalize(W: torch.Tensor, eps: float = EPS) -> torch.Tensor:
     if W.ndim != 2:
         return W

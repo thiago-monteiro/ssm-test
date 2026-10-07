@@ -19,34 +19,35 @@ from .data import (
     generate_recall_example,
 )
 
-
 StressCell = tuple[int, int, LagBucket]
 
 
 def stress_grid_cells(config: ExperimentConfig) -> tuple[StressCell, ...]:
     return tuple(
-        (length, associations, lag)
-        for length in config.task.sequence_lengths
-        for associations in config.task.association_counts
-        for lag in config.task.lag_buckets
-        if cell_is_valid(length, associations, config.task.queries)
+        (
+            (length, associations, lag)
+            for length in config.task.sequence_lengths
+            for associations in config.task.association_counts
+            for lag in config.task.lag_buckets
+            if cell_is_valid(length, associations, config.task.queries)
+        )
     )
 
 
 def extended_stress_grid_cells(config: ExperimentConfig) -> tuple[StressCell, ...]:
-    pass
     return tuple(
-        (length, associations, lag)
-        for length in (512, 1024, 2048)
-        for associations in (64, 128, 256)
-        for lag in config.task.lag_buckets
-        if cell_is_valid(length, associations, config.task.queries)
+        (
+            (length, associations, lag)
+            for length in (512, 1024, 2048)
+            for associations in (64, 128, 256)
+            for lag in config.task.lag_buckets
+            if cell_is_valid(length, associations, config.task.queries)
+        )
     )
 
 
 def evaluation_grid_cells(
-    config: ExperimentConfig,
-    grid: str,
+    config: ExperimentConfig, grid: str
 ) -> tuple[StressCell, ...]:
     if grid == "standard":
         return stress_grid_cells(config)
@@ -56,7 +57,6 @@ def evaluation_grid_cells(
 
 
 def validation_examples_by_cell(config: ExperimentConfig) -> dict[StressCell, int]:
-    pass
     cells = stress_grid_cells(config)
     base, remainder = divmod(config.task.validation_examples, len(cells))
     return {cell: base + (index < remainder) for index, cell in enumerate(cells)}
@@ -73,10 +73,13 @@ def _selected_cells(
     available = evaluation_grid_cells(config, grid)
     lengths = set(sequence_lengths or (cell[0] for cell in available))
     loads = set(association_counts or (cell[1] for cell in available))
-    lags = {LagBucket(item) for item in (lag_buckets or config.task.lag_buckets)}
+    lags = {LagBucket(item) for item in lag_buckets or config.task.lag_buckets}
     return tuple(
-        cell for cell in available
-        if cell[0] in lengths and cell[1] in loads and cell[2] in lags
+        (
+            cell
+            for cell in available
+            if cell[0] in lengths and cell[1] in loads and (cell[2] in lags)
+        )
     )
 
 
@@ -94,7 +97,8 @@ def _cell_counts(
     if split == "test":
         count = (
             config.task.extended_test_examples_per_cell
-            if grid == "extended" else config.task.test_examples_per_cell
+            if grid == "extended"
+            else config.task.test_examples_per_cell
         )
         return {cell: count for cell in cells}
     if grid == "extended":
@@ -106,8 +110,7 @@ def _cell_counts(
 
 
 def _batch_metrics(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
+    logits: torch.Tensor, labels: torch.Tensor
 ) -> list[dict[str, object]]:
     shifted_logits = logits[:, :-1].float()
     shifted_labels = labels[:, 1:]
@@ -124,14 +127,16 @@ def _batch_metrics(
         runner_up = selected.clone()
         runner_up.scatter_(1, targets.unsqueeze(1), -torch.inf)
         margins = target_logits - runner_up.max(dim=1).values
-        rows.append({
-            "exact_match": bool(correct.all()),
-            "answer_token_accuracy": float(correct.float().mean()),
-            "cross_entropy": float(F.cross_entropy(selected, targets)),
-            "mean_margin": float(margins.mean()),
-            "predictions": predictions.detach().cpu().tolist(),
-            "targets": targets.detach().cpu().tolist(),
-        })
+        rows.append(
+            {
+                "exact_match": bool(correct.all()),
+                "answer_token_accuracy": float(correct.float().mean()),
+                "cross_entropy": float(F.cross_entropy(selected, targets)),
+                "mean_margin": float(margins.mean()),
+                "predictions": predictions.detach().cpu().tolist(),
+                "targets": targets.detach().cpu().tolist(),
+            }
+        )
     return rows
 
 
@@ -182,13 +187,12 @@ def evaluate_stress_grid(
         dynamic_ncols=True,
     )
     model.eval()
-
     with predictions_path.open("w") as prediction_file:
         for length, associations, lag in cells:
             per_example: list[dict[str, object]] = []
-            count = counts[(length, associations, lag)]
+            count = counts[length, associations, lag]
             batch_size = min(max_batch_size, max(1, max_batch_tokens // length))
-            cell_offset = canonical_index[(length, associations, lag)] * 1_000_000
+            cell_offset = canonical_index[length, associations, lag] * 1000000
             for start in range(0, count, batch_size):
                 examples = [
                     generate_recall_example(
@@ -227,56 +231,69 @@ def evaluate_stress_grid(
                     prediction_file.write(json.dumps(row, sort_keys=True) + "\n")
                     per_example.append(row)
                 progress.update(len(examples))
-            exact_match = sum(bool(row["exact_match"]) for row in per_example) / count
-            token_accuracy = sum(float(row["answer_token_accuracy"]) for row in per_example) / count
-            cross_entropy = sum(float(row["cross_entropy"]) for row in per_example) / count
-            mean_margin = sum(float(row["mean_margin"]) for row in per_example) / count
-            median_lag = statistics.median(
-                lag_value for row in per_example for lag_value in row["exact_lags"]
+            exact_match = sum((bool(row["exact_match"]) for row in per_example)) / count
+            token_accuracy = (
+                sum((float(row["answer_token_accuracy"]) for row in per_example))
+                / count
             )
-            cell_rows.append({
-                "sequence_length": length,
-                "associations": associations,
-                "lag_bucket": str(lag),
-                "examples": count,
-                "exact_match": exact_match,
-                "answer_token_accuracy": token_accuracy,
-                "cross_entropy": cross_entropy,
-                "mean_margin": mean_margin,
-                "median_exact_lag": median_lag,
-                "easy": length <= 256 and associations <= 16 and lag in (
-                    LagBucket.NEAR, LagBucket.MIDDLE
-                ),
-            })
+            cross_entropy = (
+                sum((float(row["cross_entropy"]) for row in per_example)) / count
+            )
+            mean_margin = (
+                sum((float(row["mean_margin"]) for row in per_example)) / count
+            )
+            median_lag = statistics.median(
+                (lag_value for row in per_example for lag_value in row["exact_lags"])
+            )
+            cell_rows.append(
+                {
+                    "sequence_length": length,
+                    "associations": associations,
+                    "lag_bucket": str(lag),
+                    "examples": count,
+                    "exact_match": exact_match,
+                    "answer_token_accuracy": token_accuracy,
+                    "cross_entropy": cross_entropy,
+                    "mean_margin": mean_margin,
+                    "median_exact_lag": median_lag,
+                    "easy": length <= 256
+                    and associations <= 16
+                    and (lag in (LagBucket.NEAR, LagBucket.MIDDLE)),
+                }
+            )
     progress.close()
-
     fieldnames = list(cell_rows[0])
     with (output_dir / "stress_grid.csv").open("w", newline="") as cell_file:
         writer = csv.DictWriter(cell_file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(cell_rows)
-
     load80: dict[str, int | None] = {}
     for length in sorted({int(row["sequence_length"]) for row in cell_rows}):
         passing = []
         for associations in sorted({int(row["associations"]) for row in cell_rows}):
             relevant = [
-                row for row in cell_rows
-                if row["sequence_length"] == length and row["associations"] == associations
+                row
+                for row in cell_rows
+                if row["sequence_length"] == length
+                and row["associations"] == associations
             ]
-            if relevant and sum(float(row["exact_match"]) for row in relevant) / len(relevant) >= 0.8:
+            if (
+                relevant
+                and sum((float(row["exact_match"]) for row in relevant)) / len(relevant)
+                >= 0.8
+            ):
                 passing.append(associations)
         load80[str(length)] = max(passing) if passing else None
-
     lag80: dict[str, dict[str, object] | None] = {}
-    for length, associations in sorted({
-        (int(row["sequence_length"]), int(row["associations"])) for row in cell_rows
-    }):
+    for length, associations in sorted(
+        {(int(row["sequence_length"]), int(row["associations"])) for row in cell_rows}
+    ):
         passing = [
-            row for row in cell_rows
+            row
+            for row in cell_rows
             if row["sequence_length"] == length
             and row["associations"] == associations
-            and float(row["exact_match"]) >= 0.8
+            and (float(row["exact_match"]) >= 0.8)
         ]
         key = f"length={length},associations={associations}"
         if passing:
@@ -287,10 +304,10 @@ def evaluate_stress_grid(
             }
         else:
             lag80[key] = None
-
     easy_rows = [row for row in cell_rows if row["easy"]]
     train_cell_rows = [
-        row for row in cell_rows
+        row
+        for row in cell_rows
         if row["sequence_length"] == config.task.train_sequence_length
         and row["associations"] == config.task.train_associations
     ]
@@ -299,20 +316,26 @@ def evaluate_stress_grid(
         "grid": grid,
         "examples": total_examples,
         "cells": len(cell_rows),
-        "stress_auc": sum(float(row["exact_match"]) for row in cell_rows) / len(cell_rows),
+        "stress_auc": sum((float(row["exact_match"]) for row in cell_rows))
+        / len(cell_rows),
         "answer_token_accuracy": sum(
-            float(row["answer_token_accuracy"]) for row in cell_rows
-        ) / len(cell_rows),
-        "cross_entropy": sum(float(row["cross_entropy"]) for row in cell_rows) / len(cell_rows),
-        "mean_margin": sum(float(row["mean_margin"]) for row in cell_rows) / len(cell_rows),
-        "easy_stress_auc": (
-            sum(float(row["exact_match"]) for row in easy_rows) / len(easy_rows)
-            if easy_rows else None
-        ),
-        "training_distribution_accuracy": (
-            sum(float(row["exact_match"]) for row in train_cell_rows) / len(train_cell_rows)
-            if train_cell_rows else None
-        ),
+            (float(row["answer_token_accuracy"]) for row in cell_rows)
+        )
+        / len(cell_rows),
+        "cross_entropy": sum((float(row["cross_entropy"]) for row in cell_rows))
+        / len(cell_rows),
+        "mean_margin": sum((float(row["mean_margin"]) for row in cell_rows))
+        / len(cell_rows),
+        "easy_stress_auc": sum((float(row["exact_match"]) for row in easy_rows))
+        / len(easy_rows)
+        if easy_rows
+        else None,
+        "training_distribution_accuracy": sum(
+            (float(row["exact_match"]) for row in train_cell_rows)
+        )
+        / len(train_cell_rows)
+        if train_cell_rows
+        else None,
         "load80": load80,
         "lag80": lag80,
         "artifacts": {
@@ -320,5 +343,7 @@ def evaluate_stress_grid(
             "stress_grid": str(output_dir / "stress_grid.csv"),
         },
     }
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    (output_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    )
     return summary

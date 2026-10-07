@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import argparse
@@ -12,73 +11,101 @@ from scipy import stats
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-
 from src.expB.train import eval_position, train_ssm
 from src.parallel import run_parallel
 
 
 def _expB_worker(task: tuple) -> tuple:
-    seed, mode, L, k, steps, d_model, device, queries_per_pos, no_pos_embed, with_replacement = task
+    (
+        seed,
+        mode,
+        L,
+        k,
+        steps,
+        d_model,
+        device,
+        queries_per_pos,
+        no_pos_embed,
+        with_replacement,
+    ) = task
     model, meta = train_ssm(
-        seed=seed, mode=mode, L=L, k=k, steps=steps,
-        d_model=d_model, device=device,
-        no_pos_embed=no_pos_embed, with_replacement=with_replacement,
+        seed=seed,
+        mode=mode,
+        L=L,
+        k=k,
+        steps=steps,
+        d_model=d_model,
+        device=device,
+        no_pos_embed=no_pos_embed,
+        with_replacement=with_replacement,
     )
     metrics = eval_position(
-        model, seed=seed, L=L, V=model.V, queries_per_pos=queries_per_pos,
-        device=device, do_intervention=True, do_decode_probe=True, do_task_os=True,
+        model,
+        seed=seed,
+        L=L,
+        V=model.V,
+        queries_per_pos=queries_per_pos,
+        device=device,
+        do_intervention=True,
+        do_decode_probe=True,
+        do_task_os=True,
     )
     metrics["final_train_acc"] = meta["final_acc"]
     metrics["best_val_acc"] = meta["best_val_acc"]
     curve = metrics.pop("acc_curve")
     tau = metrics.pop("tau", None)
     return (metrics, curve, tau)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--seeds", type=int, default=5)
-    p.add_argument("--L", type=int, default=32)
+    p.add_argument("--L", type=int, nargs="+", default=[32])
     p.add_argument("--k", type=int, default=128)
     p.add_argument("--steps", type=int, default=4000)
-    p.add_argument("--d-model", type=int, default=64)
-    p.add_argument("--modes", type=str, default="B0,BW,BR")
-    p.add_argument("--out", type=str, default=str(ROOT / "results" / "expB"))
-    p.add_argument("--device", type=str, default="cuda")
+    p.add_argument("--modes", default="B0,BW,BR")
+    p.add_argument("--out", default=str(ROOT / "results" / "expB"))
+    p.add_argument("--device", default="cuda")
     p.add_argument("--queries-per-pos", type=int, default=200)
     p.add_argument("--quick", action="store_true")
-    p.add_argument("--scale", action="store_true")
-    p.add_argument("--all-ablations", action="store_true")
-    p.add_argument("--parallel", type=int, default=0, help="parallel workers (0=sequential)")
-    p.add_argument("--long-L", type=int, nargs="+", default=None, help="list of L values for sweep (overrides --L)")
-    p.add_argument("--no-pos-embed", action="store_true", help="disable position embeddings")
-    p.add_argument("--no-replacement", action="store_true", help="sample tokens without replacement")
+    p.add_argument(
+        "--parallel", type=int, default=0, help="parallel workers (0=sequential)"
+    )
+    p.add_argument(
+        "--no-pos-embed", action="store_true", help="disable position embeddings"
+    )
+    p.add_argument(
+        "--no-replacement",
+        action="store_true",
+        help="sample tokens without replacement",
+    )
     args = p.parse_args()
     if args.quick:
         args.seeds = 2
         args.steps = 400
         args.queries_per_pos = 40
-    if args.all_ablations:
-        args.modes = "B0,BW,BR,BX,BW_BR,B0_noshort,BR_noshort,sphere_on_z"
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    l_values = args.long_L if args.long_L is not None else [args.L]
-    grids = []
-    if args.scale and not args.quick:
-        scale_grid = [
-            (Lv, kv, args.steps)
-            for Lv in l_values
-            for kv in ([64, 128, 256] if Lv >= 128 else [64, 128])
-        ]
-        grids.extend(scale_grid)
-    else:
-        for Lv in l_values:
-            grids.append((Lv, args.k, args.steps))
+    grids = [(length, args.k, args.steps) for length in args.L]
     tasks = []
     for L, k, steps in grids:
         for seed in range(args.seeds):
             for mode in modes:
-                tasks.append((seed, mode, L, k, steps, args.d_model, args.device,
-                              args.queries_per_pos, args.no_pos_embed, not args.no_replacement))
+                tasks.append(
+                    (
+                        seed,
+                        mode,
+                        L,
+                        k,
+                        steps,
+                        64,
+                        args.device,
+                        args.queries_per_pos,
+                        args.no_pos_embed,
+                        not args.no_replacement,
+                    )
+                )
     n_workers = args.parallel if args.parallel > 0 else None
     raw_results = run_parallel(_expB_worker, tasks, n_workers=n_workers)
     all_metrics: list[dict] = []
@@ -90,10 +117,16 @@ def main() -> None:
         mode_val = metrics["mode"]
         seed_val = metrics["seed"]
         for ell, a in enumerate(curve):
-            curves.append({
-                "seed": seed_val, "mode": mode_val, "L": L_val, "k": k_val,
-                "position": ell, "accuracy": a,
-            })
+            curves.append(
+                {
+                    "seed": seed_val,
+                    "mode": mode_val,
+                    "L": L_val,
+                    "k": k_val,
+                    "position": ell,
+                    "accuracy": a,
+                }
+            )
     df = pd.DataFrame(all_metrics)
     df_curves = pd.DataFrame(curves)
     df.to_csv(out_dir / "metrics.csv", index=False)
@@ -118,14 +151,18 @@ def main() -> None:
                 mdf = sub[sub["mode"] == mode].sort_values("seed")
                 if len(b0) < 2 or len(mdf) == 0:
                     continue
-                u0 = b0["udepth"].values[:len(mdf)]
-                um = mdf["udepth"].values[:len(mdf)]
+                u0 = b0["udepth"].values[: len(mdf)]
+                um = mdf["udepth"].values[: len(mdf)]
                 if len(u0) < 2:
                     continue
                 tstat, pval = stats.ttest_rel(u0, um)
                 diff = um - u0
                 mean_diff = float(diff.mean())
-                sem = float(diff.std(ddof=1) / np.sqrt(len(diff))) if len(diff) > 1 else 0.0
+                sem = (
+                    float(diff.std(ddof=1) / np.sqrt(len(diff)))
+                    if len(diff) > 1
+                    else 0.0
+                )
                 gs["comparisons"][mode] = {
                     "udepth_b0_mean": float(u0.mean()),
                     "udepth_mode_mean": float(um.mean()),
@@ -148,14 +185,14 @@ def main() -> None:
                 }
                 e = float(mdf["endpoint_acc"].mean())
                 o = float(mdf["overall_acc"].mean())
-                pass_guard = (e >= e0 - delta) and (o >= o0 - delta)
+                pass_guard = e >= e0 - delta and o >= o0 - delta
                 udepth_better = mean_diff < 0
                 gs["guardrail"][mode] = {
                     "endpoint_mean": e,
                     "overall_mean": o,
                     "pass_guardrail": bool(pass_guard),
                     "udepth_reduced": bool(udepth_better),
-                    "h1_support": bool(pass_guard and udepth_better and pval < 0.05),
+                    "h1_support": bool(pass_guard and udepth_better and (pval < 0.05)),
                     "h1_support_descriptive": bool(pass_guard and udepth_better),
                 }
         stats_out["grids"][glabel] = gs
@@ -177,5 +214,7 @@ def main() -> None:
     print("\n=== ExpB summary ===")
     print(json.dumps(stats_out, indent=2))
     print(f"Wrote results to {out_dir}")
+
+
 if __name__ == "__main__":
     main()

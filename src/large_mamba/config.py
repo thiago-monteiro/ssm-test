@@ -29,7 +29,7 @@ class ModelConfig:
     mamba_revision: str = "95d8aba8a8c75aedcaa6143713b11e745e7cd0d9"
     preferred_scope: str = "all"
     fallback_layers: tuple[int, ...] = (7, 15, 23, 31, 39, 47, 55, 63)
-    epsilon: float = 1e-6
+    epsilon: float = 1e-06
 
 
 @dataclass(frozen=True)
@@ -47,13 +47,13 @@ class TaskConfig:
     lag_buckets: tuple[LagBucket, ...] = tuple(LagBucket)
     split_seeds: dict[str, int] = field(
         default_factory=lambda: {
-            "calibration": 10_001,
-            "train": 20_003,
-            "validation": 30_007,
-            "test": 40_009,
-            "preflight": 50_021,
-            "extended_validation": 60_013,
-            "extended_test": 70_001,
+            "calibration": 10001,
+            "train": 20003,
+            "validation": 30007,
+            "test": 40009,
+            "preflight": 50021,
+            "extended_validation": 60013,
+            "extended_test": 70001,
         }
     )
 
@@ -66,12 +66,12 @@ class TrainingConfig:
     lora_rank: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.0
-    lora_learning_rate: float = 2e-4
-    recurrence_learning_rate: float = 2e-5
+    lora_learning_rate: float = 0.0002
+    recurrence_learning_rate: float = 2e-05
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     warmup_fraction: float = 0.05
-    projection_ramp_fraction: float = 0.10
+    projection_ramp_fraction: float = 0.1
     checkpoint_steps: tuple[int, ...] = (0, 100, 300, 1000)
 
     @property
@@ -80,7 +80,9 @@ class TrainingConfig:
 
     @property
     def micro_batch_sizes(self) -> tuple[int, ...]:
-        full_batches, remainder = divmod(self.effective_batch_size, self.micro_batch_size)
+        full_batches, remainder = divmod(
+            self.effective_batch_size, self.micro_batch_size
+        )
         sizes = (self.micro_batch_size,) * full_batches
         return sizes + ((remainder,) if remainder else ())
 
@@ -103,11 +105,13 @@ class ExperimentConfig:
             * self.training.optimizer_steps
         )
         if actual_tokens != expected_tokens:
-            raise ValueError(f"processed-token budget changed: {actual_tokens} != {expected_tokens}")
+            raise ValueError(
+                f"processed-token budget changed: {actual_tokens} != {expected_tokens}"
+            )
         split_seeds = list(self.task.split_seeds.values())
         if len(split_seeds) != len(set(split_seeds)):
             raise ValueError("data split seeds must be disjoint")
-        if self.model.epsilon != 1e-6:
+        if self.model.epsilon != 1e-06:
             raise ValueError("the preregistered recurrence epsilon is 1e-6")
         if set(self.seeds) != {0, 1, 2}:
             raise ValueError("the confirmatory continuation seeds must be 0, 1, and 2")
@@ -146,17 +150,17 @@ def choose_layer_scope(
     peak_allocated_gib: float,
     fallback_layers: tuple[int, ...] = ModelConfig().fallback_layers,
 ) -> tuple[int, ...]:
-    pass
     projected_hours = seconds_per_step * 1000 / 3600
     if projected_hours <= 12.0 and peak_allocated_gib <= 22.5:
         return tuple(range(n_layers))
     if n_layers == 64:
         return fallback_layers
-    
     count = min(8, n_layers)
-    return tuple(round((i + 1) * n_layers / count) - 1 for i in range(count))
+    return tuple((round((i + 1) * n_layers / count) - 1 for i in range(count)))
 
 
-def projection_strength(step: int, total_steps: int, ramp_fraction: float = 0.10) -> float:
+def projection_strength(
+    step: int, total_steps: int, ramp_fraction: float = 0.1
+) -> float:
     ramp_steps = max(1, round(total_steps * ramp_fraction))
     return min(1.0, max(0.0, step / ramp_steps))
