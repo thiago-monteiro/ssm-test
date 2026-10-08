@@ -12,12 +12,9 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.large_mamba.adapter import (
     instrument_model,
-    make_remaining_mixers_lora_compatible,
-    set_projection_strength,
 )
 from src.large_mamba.calibration import calibrate_radii
 from src.large_mamba.config import Condition, ExperimentConfig, LagBucket
@@ -38,14 +35,18 @@ from src.large_mamba.faithfulness import (
 from src.large_mamba.manifest import write_environment_manifest
 from src.large_mamba.mechanisms import perturb_state
 from src.large_mamba.modeling import (
-    apply_lora,
-    enable_activation_checkpointing,
-    enable_recurrence_parameters,
     load_official_model,
-    load_trainable_checkpoint,
     parameter_manifest,
 )
+from src.large_mamba.runtime import (
+    load_radii,
+    load_run,
+    load_token_pools,
+    prepare_model,
+)
 from src.large_mamba.training import run_training
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _git_commit() -> str | None:
@@ -94,7 +95,7 @@ def train(args: argparse.Namespace) -> None:
     config.validate()
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "training state-spaces/mamba-2.8b requires a CUDA-enabled PyTorch install; install requirements.txt in the ssm-test-plan environment"
+            "training state-spaces/mamba-2.8b requires a CUDA-enabled PyTorch install; create the ssm-test-plan environment from environment.yml"
         )
     device = torch.device("cuda", 0)
     torch.cuda.set_device(device)
@@ -122,14 +123,7 @@ def train(args: argparse.Namespace) -> None:
     (output / "runtime_config.json").write_text(
         json.dumps(runtime_config, indent=2, sort_keys=True) + "\n"
     )
-    try:
-        from transformers import AutoTokenizer
-    except ImportError as error:
-        raise RuntimeError("install requirements.txt before training") from error
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.model.tokenizer_repository, revision=config.model.tokenizer_revision
-    )
-    pools = TokenPools.from_tokenizer(tokenizer)
+    pools = load_token_pools(config)
     model, snapshot = load_official_model(
         config.model.repository,
         revision=config.model.revision,
@@ -142,10 +136,7 @@ def train(args: argparse.Namespace) -> None:
         or Path(config.output_dir) / "calibration" / f"radii-{args.scope}.json"
     )
     if condition in (Condition.SPHERE, Condition.READ) and radii_path.exists():
-        radii = {
-            int(key): float(value)
-            for key, value in json.loads(radii_path.read_text()).items()
-        }
+        radii = load_radii(radii_path, layers, condition)
         adapters = instrument_model(
             model,
             layers,
@@ -181,18 +172,9 @@ def train(args: argparse.Namespace) -> None:
             for adapter in adapters:
                 adapter.set_condition(condition)
                 adapter.set_radius(radii[int(adapter.layer_idx)])
-    make_remaining_mixers_lora_compatible(model)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    model = apply_lora(
-        model,
-        rank=config.training.lora_rank,
-        alpha=config.training.lora_alpha,
-        dropout=config.training.lora_dropout,
+    prepare_model(
+        model, config, args.seed, activation_checkpointing=args.activation_checkpointing
     )
-    enable_recurrence_parameters(model)
-    if args.activation_checkpointing:
-        enable_activation_checkpointing(model)
     manifest = parameter_manifest(model)
     manifest.write(output / "trainable_parameters.json")
     factory = RecallBatchFactory(
@@ -243,7 +225,7 @@ def evaluate(args: argparse.Namespace) -> None:
     config.validate()
     condition = Condition(runtime["condition"])
     seed = int(runtime["seed"])
-    layers = tuple((int(index) for index in runtime["layers"]))
+    layers = tuple(int(index) for index in runtime["layers"])
     scope = str(runtime["scope"])
     checkpoint = args.checkpoint or run_dir / "checkpoint-1000.pt"
     if not checkpoint.exists():
@@ -254,55 +236,9 @@ def evaluate(args: argparse.Namespace) -> None:
     output = args.output or run_dir / "evaluation" / evaluation_name / checkpoint.stem
     device = torch.device("cuda", 0)
     torch.cuda.set_device(device)
-    try:
-        from transformers import AutoTokenizer
-    except ImportError as error:
-        raise RuntimeError("install requirements.txt before evaluation") from error
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.model.tokenizer_repository, revision=config.model.tokenizer_revision
-    )
-    pools = TokenPools.from_tokenizer(tokenizer)
-    model, snapshot = load_official_model(
-        config.model.repository,
-        revision=config.model.revision,
-        dtype=torch.bfloat16,
-        device=device,
-    )
-    radii_path = (
-        args.radii or Path(config.output_dir) / "calibration" / f"radii-{scope}.json"
-    )
-    if condition in (Condition.SPHERE, Condition.READ):
-        if not radii_path.exists():
-            raise FileNotFoundError(f"missing calibrated radii: {radii_path}")
-        radii = {
-            int(key): float(value)
-            for key, value in json.loads(radii_path.read_text()).items()
-        }
-    else:
-        radii = {index: 1.0 for index in layers}
-    instrument_model(
-        model,
-        layers,
-        radii,
-        condition,
-        epsilon=config.model.epsilon,
-        scan_chunk_size=int(runtime["scan_chunk_size"]),
-        compile_scan=bool(runtime["compile_projected_scan"]),
-    )
-    make_remaining_mixers_lora_compatible(model)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    apply_lora(
-        model,
-        rank=config.training.lora_rank,
-        alpha=config.training.lora_alpha,
-        dropout=config.training.lora_dropout,
-    )
-    enable_recurrence_parameters(model)
-    if bool(runtime.get("activation_checkpointing", False)):
-        enable_activation_checkpointing(model)
-    load_trainable_checkpoint(model, checkpoint)
-    set_projection_strength(model, 1.0)
+    pools = load_token_pools(config)
+    run = load_run(run_dir, checkpoint, radii_path=args.radii)
+    model, snapshot = run.model, run.snapshot
     summary = evaluate_stress_grid(
         model,
         pools,
@@ -356,63 +292,17 @@ def evaluate(args: argparse.Namespace) -> None:
     )
 
 
-def _load_run_model(run_dir: Path, checkpoint: Path | None = None):
-    runtime = json.loads((run_dir / "runtime_config.json").read_text())
-    config = ExperimentConfig()
-    condition = Condition(runtime["condition"])
-    layers = tuple((int(index) for index in runtime["layers"]))
-    checkpoint = checkpoint or run_dir / "checkpoint-1000.pt"
-    device = torch.device("cuda", 0)
-    model, _ = load_official_model(
-        config.model.repository,
-        revision=config.model.revision,
-        dtype=torch.bfloat16,
-        device=device,
-    )
-    radii_path = (
-        Path(config.output_dir) / "calibration" / f"radii-{runtime['scope']}.json"
-    )
-    radii = (
-        {
-            int(key): float(value)
-            for key, value in json.loads(radii_path.read_text()).items()
-        }
-        if condition in (Condition.SPHERE, Condition.READ)
-        else {index: 1.0 for index in layers}
-    )
-    adapters = instrument_model(
-        model,
-        layers,
-        radii,
-        condition,
-        epsilon=config.model.epsilon,
-        scan_chunk_size=int(runtime["scan_chunk_size"]),
-        compile_scan=bool(runtime["compile_projected_scan"]),
-    )
-    make_remaining_mixers_lora_compatible(model)
-    torch.manual_seed(int(runtime["seed"]))
-    torch.cuda.manual_seed_all(int(runtime["seed"]))
-    apply_lora(
-        model,
-        rank=config.training.lora_rank,
-        alpha=config.training.lora_alpha,
-        dropout=config.training.lora_dropout,
-    )
-    enable_recurrence_parameters(model)
-    if bool(runtime.get("activation_checkpointing", False)):
-        enable_activation_checkpointing(model)
-    load_trainable_checkpoint(model, checkpoint)
-    set_projection_strength(model, 1.0)
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
-    model.eval()
-    return (model, adapters, condition, config, device)
-
-
 def _faithfulness_one_run(
     args: argparse.Namespace, run_dir: Path
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    model, adapters, condition, config, device = _load_run_model(run_dir)
+    run = load_run(run_dir, freeze=True)
+    model, adapters, condition, config, device = (
+        run.model,
+        run.adapters,
+        run.condition,
+        run.config,
+        run.device,
+    )
     adapter_by_layer = {int(adapter.layer_idx): adapter for adapter in adapters}
     layer = args.layer if args.layer is not None else max(adapter_by_layer)
     if layer not in adapter_by_layer:
@@ -420,12 +310,7 @@ def _faithfulness_one_run(
             f"layer {layer} is not instrumented; choose from {sorted(adapter_by_layer)}"
         )
     adapter = adapter_by_layer[layer]
-    from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.model.tokenizer_repository, revision=config.model.tokenizer_revision
-    )
-    pools = TokenPools.from_tokenizer(tokenizer)
+    pools = load_token_pools(config)
     cells = extended_stress_grid_cells(config)
     cell = (args.sequence_length, args.associations, LagBucket(args.lag_bucket))
     if cell not in cells:
@@ -561,16 +446,11 @@ def faithfulness(args: argparse.Namespace) -> None:
         index
         for index in range(args.examples)
         if all(
-            (
-                any(
-                    (
-                        int(row["example_index"]) == index
-                        and bool(row["clean_correct"])
-                        for row in results[label][0]
-                    )
-                )
-                for label in ("ord", "sphere")
+            any(
+                int(row["example_index"]) == index and bool(row["clean_correct"])
+                for row in results[label][0]
             )
+            for label in ("ord", "sphere")
         )
     }
     combined: dict[str, object] = {
@@ -670,7 +550,7 @@ def main() -> None:
     evaluate_parser.add_argument("--sequence-lengths", nargs="+", type=int)
     evaluate_parser.add_argument("--association-counts", nargs="+", type=int)
     evaluate_parser.add_argument(
-        "--lag-buckets", nargs="+", choices=tuple((str(item) for item in LagBucket))
+        "--lag-buckets", nargs="+", choices=tuple(str(item) for item in LagBucket)
     )
     faith_parser = subparsers.add_parser(
         "faithfulness",
@@ -691,7 +571,7 @@ def main() -> None:
     faith_parser.add_argument("--associations", type=int, default=128)
     faith_parser.add_argument(
         "--lag-bucket",
-        choices=tuple((str(item) for item in LagBucket)),
+        choices=tuple(str(item) for item in LagBucket),
         default="middle",
     )
     args = parser.parse_args()

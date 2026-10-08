@@ -4,9 +4,9 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
+from src.classification import classification_step, curriculum_length
 from src.expB.data import V_DEFAULT, make_batch
 from src.expB.ssm import DiagonalSSM
 from src.seed import seed_everything
@@ -58,23 +58,11 @@ def train_ssm(
     history: list[dict[str, float]] = []
     model.train()
     for step in range(1, steps + 1):
-        if step < steps // 5:
-            L_step = max(8, L // 4)
-        elif step < steps // 2:
-            L_step = max(16, L // 2)
-        else:
-            L_step = L
+        L_step = curriculum_length(step, steps, L)
         batch = make_batch(
             batch_size, L_step, V=V, device=device, with_replacement=with_replacement
         )
-        out = model(batch["input_ids"], batch["query_pos"])
-        loss = F.cross_entropy(out["logits"], batch["target"])
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        if grad_clip is not None:
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        opt.step()
-        sched.step()
+        out, loss = classification_step(model, batch, opt, sched, grad_clip)
         model.row_normalize_weights_()
         if log_every and step % log_every == 0:
             with torch.no_grad():

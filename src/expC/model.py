@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from src.diagonal import initialize_layers
 
 EPS = 1e-08
 
@@ -31,35 +31,7 @@ class CopySSM(nn.Module):
         self.pos_embed = nn.Embedding(L, d_model)
         nn.init.normal_(self.embed.weight, std=0.02)
         nn.init.normal_(self.pos_embed.weight, std=0.02)
-        self.a_raw = nn.ParameterList()
-        self.B = nn.ParameterList()
-        self.C = nn.ParameterList()
-        self.layer_norm = nn.ModuleList()
-        self.out_proj = nn.ModuleList()
-        for _ in range(n_layers):
-            a = nn.Parameter(torch.zeros(k))
-            with torch.no_grad():
-                target = -math.log(0.995)
-                a.fill_(math.log(math.expm1(max(target, 0.0001))))
-            self.a_raw.append(a)
-            Bm = nn.Parameter(torch.empty(k, d_model))
-            Cm = nn.Parameter(torch.empty(d_model, k))
-            nn.init.xavier_uniform_(Bm)
-            nn.init.xavier_uniform_(Cm)
-            self.B.append(Bm)
-            self.C.append(Cm)
-            self.layer_norm.append(nn.LayerNorm(d_model))
-            self.out_proj.append(
-                nn.Sequential(
-                    nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, d_model)
-                )
-            )
-        self.head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, V),
-        )
+        initialize_layers(self, n_layers=n_layers, k=k, d_model=d_model, V=V)
 
     def A_bar(self, layer: int) -> torch.Tensor:
         return torch.exp(-F.softplus(self.a_raw[layer]))
@@ -79,22 +51,17 @@ class CopySSM(nn.Module):
         A = self.A_bar(layer)
         Bu = F.linear(x_in, self.B[layer])
         if h_init is None:
-            Bsz, L, _ = Bu.shape
-            h_prev = torch.zeros(Bsz, self.k, device=Bu.device, dtype=Bu.dtype)
-            steps = []
-            for t in range(L):
-                h_prev = A * h_prev + Bu[:, t]
-                h_prev = self._project(h_prev)
-                steps.append(h_prev.unsqueeze(1))
-            return torch.cat(steps, dim=1)
-        h_prev = h_init
-        out_steps = []
-        for t in range(t0 + 1, Bu.shape[-2]):
+            h_prev = torch.zeros(Bu.shape[0], self.k, device=Bu.device, dtype=Bu.dtype)
+            start = 0
+        else:
+            h_prev = h_init
+            start = t0 + 1
+        steps = []
+        for t in range(start, Bu.shape[-2]):
             step = Bu[:, t] if Bu.dim() == 3 else Bu[t]
-            h_prev = A * h_prev + step
-            h_prev = self._project(h_prev)
-            out_steps.append(h_prev.unsqueeze(-2))
-        return torch.cat(out_steps, dim=-2)
+            h_prev = self._project(A * h_prev + step)
+            steps.append(h_prev.unsqueeze(-2))
+        return torch.cat(steps, dim=-2)
 
     def _body(
         self, x0: torch.Tensor, query_pos: torch.Tensor, return_all: bool = False

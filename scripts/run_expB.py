@@ -5,14 +5,14 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-from scipy import stats
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.expB.train import eval_position, train_ssm
 from src.parallel import run_parallel
+from src.stats import paired_comparison
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _expB_worker(task: tuple) -> tuple:
@@ -155,33 +155,26 @@ def main() -> None:
                 um = mdf["udepth"].values[: len(mdf)]
                 if len(u0) < 2:
                     continue
-                tstat, pval = stats.ttest_rel(u0, um)
-                diff = um - u0
-                mean_diff = float(diff.mean())
-                sem = (
-                    float(diff.std(ddof=1) / np.sqrt(len(diff)))
-                    if len(diff) > 1
-                    else 0.0
-                )
+                mean_diff, ci95, tstat, pval = paired_comparison(u0, um)
                 gs["comparisons"][mode] = {
                     "udepth_b0_mean": float(u0.mean()),
                     "udepth_mode_mean": float(um.mean()),
                     "mean_diff_mode_minus_b0": mean_diff,
-                    "ci95": [mean_diff - 1.96 * sem, mean_diff + 1.96 * sem],
+                    "ci95": ci95,
                     "t_stat": float(tstat),
                     "p_value": float(pval),
-                    "os_b0_mean": float(b0["over_smoothing"].mean()),
-                    "os_mode_mean": float(mdf["over_smoothing"].mean()),
-                    "os_readout_b0_mean": float(b0["over_smoothing_readout"].mean()),
-                    "os_readout_mode_mean": float(mdf["over_smoothing_readout"].mean()),
-                    "probe_acc_b0_mean": float(b0["decode_probe_acc"].mean()),
-                    "probe_acc_mode_mean": float(mdf["decode_probe_acc"].mean()),
-                    "int_drop_b0_mean": float(b0["intervention_drop"].mean()),
-                    "int_drop_mode_mean": float(mdf["intervention_drop"].mean()),
-                    "task_os_b0_mean": float(b0["task_conditioned_os"].mean()),
-                    "task_os_mode_mean": float(mdf["task_conditioned_os"].mean()),
-                    "snr_effective_b0_mean": float(b0["snr_effective"].mean()),
-                    "snr_effective_mode_mean": float(mdf["snr_effective"].mean()),
+                    **{
+                        f"{label}_{condition}_mean": float(frame[column].mean())
+                        for label, column in (
+                            ("os", "over_smoothing"),
+                            ("os_readout", "over_smoothing_readout"),
+                            ("probe_acc", "decode_probe_acc"),
+                            ("int_drop", "intervention_drop"),
+                            ("task_os", "task_conditioned_os"),
+                            ("snr_effective", "snr_effective"),
+                        )
+                        for condition, frame in (("b0", b0), ("mode", mdf))
+                    },
                 }
                 e = float(mdf["endpoint_acc"].mean())
                 o = float(mdf["overall_acc"].mean())

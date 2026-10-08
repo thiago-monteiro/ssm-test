@@ -9,47 +9,22 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from scipy import stats
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.expC.circuits import eval_path_recovery, eval_pruning_recovery
 from src.expC.faith import FaithfulnessEvaluator
 from src.expC.model import CopySSM
 from src.expC.perf import eval_geometry, eval_perf, eval_robustness
 from src.expC.train import train_copy_ssm
+from src.stats import compare_groups, improvement, paired_stats
+
+ROOT = Path(__file__).resolve().parents[1]
 
 THETA_SWEEP = [0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6]
 MID_THETAS = [0.02, 0.05, 0.1, 0.2, 0.4]
 MID_T0_FRACS = [0.25, 0.5, 0.75]
 PRUNE_FRACS = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]
 VARIANTS = ("ordinary", "sphere")
-
-
-def paired_stats(vals_ordinary: list[float], vals_sphere: list[float]) -> dict:
-    a = np.asarray([v for v in vals_ordinary if np.isfinite(v)], dtype=float)
-    b = np.asarray([v for v in vals_sphere if np.isfinite(v)], dtype=float)
-    n = min(len(a), len(b))
-    a, b = (a[:n], b[:n])
-    out = {
-        "n": int(n),
-        "mean_ordinary": float(a.mean()) if n else None,
-        "mean_sphere": float(b.mean()) if n else None,
-    }
-    if n < 2:
-        return out
-    d = b - a
-    mean_d = float(d.mean())
-    sem = float(d.std(ddof=1) / np.sqrt(n))
-    out["mean_diff_sphere_minus_ordinary"] = mean_d
-    out["ci95"] = [mean_d - 1.96 * sem, mean_d + 1.96 * sem]
-    if d.std() > 0:
-        tstat, pval = stats.ttest_rel(b, a)
-        out["t_stat"], out["p_value"] = (float(tstat), float(pval))
-    else:
-        out["t_stat"], out["p_value"] = (None, None)
-    out["n_seeds_positive_diff"] = int((d > 0).sum())
-    return out
 
 
 def load_model(
@@ -292,48 +267,35 @@ def phase_aggregate(per_seed: dict, args) -> dict:
         [per_seed[s, "ordinary"]["robustness"]["drop"] for s in range(args.seeds)],
         [per_seed[s, "sphere"]["robustness"]["drop"] for s in range(args.seeds)],
     )
-    faith_stats = {}
-    for th in THETA_SWEEP:
-        sub_o = df_ff[(df_ff["variant"] == "ordinary") & (df_ff["theta"] == th)]
-        sub_s = df_ff[(df_ff["variant"] == "sphere") & (df_ff["theta"] == th)]
-        entry = {}
-        for metric in [
-            "E_all",
-            "E_eff",
-            "rho_rank",
-            "calib_r",
-            "slope",
-            "sign_acc",
-            "fn_rate",
-            "fp_rate",
-        ]:
-            entry[metric] = paired_stats(sub_o[metric].tolist(), sub_s[metric].tolist())
-        faith_stats[f"theta={th}"] = entry
+    faith_metrics = (
+        "E_all",
+        "E_eff",
+        "rho_rank",
+        "calib_r",
+        "slope",
+        "sign_acc",
+        "fn_rate",
+        "fp_rate",
+    )
+    faith_stats = {
+        f"theta={th}": compare_groups(df_ff[df_ff["theta"] == th], faith_metrics)
+        for th in THETA_SWEEP
+    }
     stats_out["faithfulness"]["final_state"] = faith_stats
+    t0_labels = (
+        sorted(df_fm["t0_label"].dropna().unique())
+        if "t0_label" in df_fm.columns and df_fm["t0_label"].notna().any()
+        else [""]
+    )
     mid_stats = {}
-    if "t0_label" in df_fm.columns and df_fm["t0_label"].notna().any():
-        t0_labels = sorted(df_fm["t0_label"].dropna().unique().tolist())
-    else:
-        t0_labels = [""]
     for lab in t0_labels:
-        if lab == "":
-            sel_o = df_fm[df_fm["variant"] == "ordinary"]
-            sel_s = df_fm[df_fm["variant"] == "sphere"]
-        else:
-            sel_o = df_fm[(df_fm["variant"] == "ordinary") & (df_fm["t0_label"] == lab)]
-            sel_s = df_fm[(df_fm["variant"] == "sphere") & (df_fm["t0_label"] == lab)]
-        entry_by_th = {}
-        for th in MID_THETAS:
-            sub_o = sel_o[sel_o["theta"] == th]
-            sub_s = sel_s[sel_s["theta"] == th]
-            metrics = {}
-            for metric in ["E_all", "E_eff", "rho_rank", "sign_acc"]:
-                if metric in sub_o.columns:
-                    metrics[metric] = paired_stats(
-                        sub_o[metric].tolist(), sub_s[metric].tolist()
-                    )
-            entry_by_th[f"theta={th}"] = metrics
-        mid_stats[str(lab)] = entry_by_th
+        frame = df_fm[df_fm["t0_label"] == lab] if lab else df_fm
+        mid_stats[str(lab)] = {
+            f"theta={th}": compare_groups(
+                frame[frame["theta"] == th], ("E_all", "E_eff", "rho_rank", "sign_acc")
+            )
+            for th in MID_THETAS
+        }
     stats_out["faithfulness"]["mid_state"] = mid_stats
     theta_star = {}
     for variant in VARIANTS:
@@ -345,75 +307,38 @@ def phase_aggregate(per_seed: dict, args) -> dict:
         theta_star[variant] = {
             "per_seed": vals,
             "mean_theta_star": float(np.mean(finite)) if finite else None,
-            "n_reached_max": int(sum((v == max(THETA_SWEEP) for v in vals))),
+            "n_reached_max": int(sum(v == max(THETA_SWEEP) for v in vals)),
         }
     stats_out["faithfulness"]["theta_star_final"] = theta_star
-    prune_stats = {}
-    for f in PRUNE_FRACS:
-        sub_o = df_prune[(df_prune["variant"] == "ordinary") & (df_prune["f"] == f)]
-        sub_s = df_prune[(df_prune["variant"] == "sphere") & (df_prune["f"] == f)]
-        prune_stats[f"f={f:.2f}"] = {
-            "recovery_mean": paired_stats(
-                sub_o["recovery_mean"].tolist(), sub_s["recovery_mean"].tolist()
-            ),
-            "abs_recovery_mean": paired_stats(
-                sub_o["abs_recovery_mean"].tolist(), sub_s["abs_recovery_mean"].tolist()
-            ),
-        }
+    prune_stats = {
+        f"f={f:.2f}": compare_groups(
+            df_prune[df_prune["f"] == f], ("recovery_mean", "abs_recovery_mean")
+        )
+        for f in PRUNE_FRACS
+    }
     f95_o = [per_seed[s, "ordinary"]["prune"]["f95"] for s in range(args.seeds)]
     f95_s = [per_seed[s, "sphere"]["prune"]["f95"] for s in range(args.seeds)]
     prune_stats["f95"] = {
         "ordinary_per_seed": f95_o,
         "sphere_per_seed": f95_s,
         "mean_ordinary": float(np.mean([v for v in f95_o if v is not None]))
-        if any((v is not None for v in f95_o))
+        if any(v is not None for v in f95_o)
         else None,
         "mean_sphere": float(np.mean([v for v in f95_s if v is not None]))
-        if any((v is not None for v in f95_s))
+        if any(v is not None for v in f95_s)
         else None,
     }
     stats_out["circuits"]["pruning"] = prune_stats
-    path_stats = {}
-    sub_o = df_path[df_path["variant"] == "ordinary"]
-    sub_s = df_path[df_path["variant"] == "sphere"]
-    for metric in ["rho_rank_attr", "sign_acc_pos", "calib_r_pos"]:
-        path_stats[metric] = paired_stats(
-            sub_o[metric].tolist(), sub_s[metric].tolist()
-        )
-    for pidx in range(1, 9):
-        path_stats[f"cap_grad_p{pidx}"] = paired_stats(
-            sub_o[f"cap_grad_p{pidx}"].tolist(), sub_s[f"cap_grad_p{pidx}"].tolist()
-        )
+    path_stats = compare_groups(
+        df_path,
+        (
+            "rho_rank_attr",
+            "sign_acc_pos",
+            "calib_r_pos",
+            *(f"cap_grad_p{i}" for i in range(1, 9)),
+        ),
+    )
     stats_out["circuits"]["path_recovery"] = path_stats
-
-    def better_lower(metric_key, th=0.1):
-        e = faith_stats.get(f"theta={th}", {}).get(metric_key)
-        if not e or e.get("mean_diff_sphere_minus_ordinary") is None:
-            return None
-        d = e["mean_diff_sphere_minus_ordinary"]
-        p = e.get("p_value")
-        consistent = e.get("n_seeds_positive_diff", 0) == 0 and d < 0
-        return {
-            "diff": d,
-            "p": p,
-            "sphere_better": bool(d < 0),
-            "consistent_across_seeds": bool(consistent),
-        }
-
-    def better_higher(metric_key, th=0.1):
-        e = faith_stats.get(f"theta={th}", {}).get(metric_key)
-        if not e or e.get("mean_diff_sphere_minus_ordinary") is None:
-            return None
-        d = e["mean_diff_sphere_minus_ordinary"]
-        p = e.get("p_value")
-        consistent = e.get("n_seeds_positive_diff", 0) == e.get("n", 0) and d > 0
-        return {
-            "diff": d,
-            "p": p,
-            "sphere_better": bool(d > 0),
-            "consistent_across_seeds": bool(consistent),
-        }
-
     acc_p = stats_out["parity"]["accuracy"]
     parity_ok = (
         acc_p.get("mean_diff_sphere_minus_ordinary") is not None
@@ -422,33 +347,12 @@ def phase_aggregate(per_seed: dict, args) -> dict:
     ref_th = 0.1
     mid_verdicts = {}
     for lab, by_th in mid_stats.items():
-        e = by_th.get(f"theta={ref_th}", {}).get("E_all")
-        if not e or e.get("mean_diff_sphere_minus_ordinary") is None:
-            continue
-        d = e["mean_diff_sphere_minus_ordinary"]
-        mid_verdicts[lab] = {
-            "E_all_diff": d,
-            "p": e.get("p_value"),
-            "sphere_better": bool(d < 0),
-            "consistent_across_seeds": bool(
-                e.get("n_seeds_positive_diff", 0) == 0 and d < 0
-            ),
-        }
-
-    def cap_verdict(pidx):
-        e = path_stats.get(f"cap_grad_p{pidx}")
-        if not e or e.get("mean_diff_sphere_minus_ordinary") is None:
-            return None
-        d = e["mean_diff_sphere_minus_ordinary"]
-        return {
-            "diff": d,
-            "p": e.get("p_value"),
-            "sphere_better": bool(d > 0),
-            "consistent_across_seeds": bool(
-                e.get("n_seeds_positive_diff", 0) == e.get("n", 0) and d > 0
-            ),
-        }
-
+        verdict = improvement(
+            by_th.get(f"theta={ref_th}", {}).get("E_all"), higher=False
+        )
+        if verdict is not None:
+            verdict["E_all_diff"] = verdict.pop("diff")
+            mid_verdicts[lab] = verdict
     verdicts = {
         "performance_parity": {
             "holds": bool(parity_ok),
@@ -456,13 +360,23 @@ def phase_aggregate(per_seed: dict, args) -> dict:
             "note": "|acc_sphere - acc_ordinary| < 0.01",
         },
         "final_state_faithfulness_at_theta0.1": {
-            "E_all_lower_for_sphere": better_lower("E_all"),
-            "rho_rank_higher_for_sphere": better_higher("rho_rank"),
-            "sign_acc_higher_for_sphere": better_higher("sign_acc"),
-            "fn_rate_lower_for_sphere": better_lower("fn_rate"),
+            "E_all_lower_for_sphere": improvement(
+                faith_stats["theta=0.1"].get("E_all"), higher=False
+            ),
+            "rho_rank_higher_for_sphere": improvement(
+                faith_stats["theta=0.1"].get("rho_rank"), higher=True
+            ),
+            "sign_acc_higher_for_sphere": improvement(
+                faith_stats["theta=0.1"].get("sign_acc"), higher=True
+            ),
+            "fn_rate_lower_for_sphere": improvement(
+                faith_stats["theta=0.1"].get("fn_rate"), higher=False
+            ),
         },
         "mid_state_dynamics_faithfulness_at_theta0.1": mid_verdicts,
-        "path_capture_top2_higher_for_sphere": cap_verdict(2),
+        "path_capture_top2_higher_for_sphere": improvement(
+            path_stats.get("cap_grad_p2"), higher=True
+        ),
         "radius_of_validity": {
             "theta_star_ordinary_mean": theta_star["ordinary"]["mean_theta_star"],
             "theta_star_sphere_mean": theta_star["sphere"]["mean_theta_star"],
@@ -594,7 +508,7 @@ def phase_plots(per_seed: dict, stats_out: dict, args) -> None:
         bars = ax.bar(
             range(len(vals)),
             vals,
-            color=[colors[l.split("/")[1]] for l in labels],
+            color=[colors[label.split("/")[1]] for label in labels],
             alpha=0.85,
         )
         ax.set_xticks(range(len(vals)))
@@ -724,46 +638,40 @@ def phase_report(per_seed: dict, stats_out: dict, args) -> None:
         return "n/a" if x is None else format(x, spec)
 
     lines = []
-    lines.append("# expC: Hyperspherical state geometry and gradient faithfulness")
-    lines.append("")
-    lines.append("## Hypothesis (H1)")
-    lines.append("")
-    lines.append(
-        "> Constraining neural computation to hyperspherical state geometry increases the causal"
+    lines.extend(
+        """# expC: Hyperspherical state geometry and gradient faithfulness
+
+## Hypothesis (H1)
+
+> Constraining neural computation to hyperspherical state geometry increases the causal
+> faithfulness and usable radius of first-order gradient attribution, enabling more accurate
+> execution-level circuit tracing — at equal task performance.
+
+## Design
+""".split("\n")
     )
-    lines.append(
-        "> faithfulness and usable radius of first-order gradient attribution, enabling more accurate"
-    )
-    lines.append("> execution-level circuit tracing — at equal task performance.")
-    lines.append("")
-    lines.append("## Design")
-    lines.append("")
     lines.append(
         f"- Models: `M_ordinary` (h_t = A h + B x) vs `M_sphere` (h_t = normalize(A h + B x)), 2-layer diagonal SSM, k={args.k}, d={64}, L={args.L}, V={16}."
     )
     lines.append(
         f"- Identical parameter count, initialization and data stream per seed ({args.seeds} seeds); only the per-step projection differs."
     )
-    lines.append(
-        "- Behavioral target: margin S = z_y − z_alt (runner-up alt fixed from clean pass)."
-    )
-    lines.append(
-        "- First-order prediction ΔŜ = ⟨g, δ⟩ with g tangent-projected for M_sphere; actual effect ΔS measured by exact re-evaluation of the forward pass."
-    )
-    lines.append(
-        "- Perturbations: geodesic steps h' = cosθ·h + sinθ·u (sphere) vs matched relative-scale Euclidean steps δ = θ‖h‖v (ordinary)."
+    lines.extend(
+        """- Behavioral target: margin S = z_y − z_alt (runner-up alt fixed from clean pass).
+- First-order prediction ΔŜ = ⟨g, δ⟩ with g tangent-projected for M_sphere; actual effect ΔS measured by exact re-evaluation of the forward pass.
+- Perturbations: geodesic steps h' = cosθ·h + sinθ·u (sphere) vs matched relative-scale Euclidean steps δ = θ‖h‖v (ordinary).""".split(
+            "\n"
+        )
     )
     lines.append(
         f"- Eval sets: n_faith={args.n_faith} sequences for faithfulness/circuits, n_perf={args.n_perf} for performance controls."
     )
-    lines.append("")
-    lines.append("## Performance parity (control)")
-    lines.append("")
+    lines.extend("\n## Performance parity (control)\n".split("\n"))
     p = stats_out["parity"]
-    lines.append(
-        "| metric | ordinary mean | sphere mean | diff (sphere−ord) | 95% CI | paired t p |"
+    lines.extend(
+        """| metric | ordinary mean | sphere mean | diff (sphere−ord) | 95% CI | paired t p |
+|---|---|---|---|---|---|""".split("\n")
     )
-    lines.append("|---|---|---|---|---|---|")
     for m in [
         "accuracy",
         "mean_margin_correct",
@@ -781,20 +689,16 @@ def phase_report(per_seed: dict, stats_out: dict, args) -> None:
     lines.append(
         f"**Parity holds (|Δacc| < 0.01): {v['performance_parity']['holds']}**"
     )
-    lines.append("")
-    lines.append("## Local faithfulness — final state, E(θ) radius of validity")
-    lines.append("")
-    lines.append(
-        "E_all = all random directions; E_eff = restricted to directions with |ΔS| ≥ median (where first-order"
+    lines.extend(
+        """
+## Local faithfulness — final state, E(θ) radius of validity
+
+E_all = all random directions; E_eff = restricted to directions with |ΔS| ≥ median (where first-order
+theory is expected to make a real prediction). Near-orthogonal directions inflate E_all for both variants.
+
+| θ | E_all ord | E_all sph | E_eff ord | E_eff sph | ρ_rank ord | ρ_rank sph | sign acc ord | sign acc sph |
+|---|---|---|---|---|---|---|---|---|""".split("\n")
     )
-    lines.append(
-        "theory is expected to make a real prediction). Near-orthogonal directions inflate E_all for both variants."
-    )
-    lines.append("")
-    lines.append(
-        "| θ | E_all ord | E_all sph | E_eff ord | E_eff sph | ρ_rank ord | ρ_rank sph | sign acc ord | sign acc sph |"
-    )
-    lines.append("|---|---|---|---|---|---|---|---|---|")
     for th in THETA_SWEEP:
         e = faith[f"theta={th}"]
         eo, es = (e["E_all"]["mean_ordinary"], e["E_all"]["mean_sphere"])
@@ -813,17 +717,15 @@ def phase_report(per_seed: dict, stats_out: dict, args) -> None:
     lines.append(
         f"- Sphere has larger radius of validity: **{v['radius_of_validity']['sphere_larger_radius']}**"
     )
-    lines.append("")
-    lines.append("## Local faithfulness — mid state (gradients through scan dynamics)")
-    lines.append("")
-    lines.append(
-        "Intervention at intermediate last-layer states h_{t0} with exact re-scan to q; the gradient must be"
+    lines.extend(
+        """
+## Local faithfulness — mid state (gradients through scan dynamics)
+
+Intervention at intermediate last-layer states h_{t0} with exact re-scan to q; the gradient must be
+back-propagated through (q − t0) recurrence steps. For delay=0 the target token is only input AT q, so
+this isolates faithfulness of multi-step dynamical attribution.
+""".split("\n")
     )
-    lines.append(
-        "back-propagated through (q − t0) recurrence steps. For delay=0 the target token is only input AT q, so"
-    )
-    lines.append("this isolates faithfulness of multi-step dynamical attribution.")
-    lines.append("")
     mid = stats_out["faithfulness"]["mid_state"]
     for lab, by_th in mid.items():
         lines.append(f"**Intervention at t0 = {lab.replace('t0=', '')}**")
@@ -852,11 +754,13 @@ def phase_report(per_seed: dict, stats_out: dict, args) -> None:
                 f"| {th} | {fmt(eo)} | {fmt(es)} | {fmt(ro)} | {fmt(rs)} | {fmt(so, '.3f')} | {fmt(ss, '.3f')} |"
             )
         lines.append("")
-    lines.append("## Circuit tracing (execution-level)")
-    lines.append("")
+    lines.extend("## Circuit tracing (execution-level)\n".split("\n"))
     pr = stats_out["circuits"]["pruning"]
-    lines.append("| retained fraction f | recovery ord | recovery sph |")
-    lines.append("|---|---|---|")
+    lines.extend(
+        "| retained fraction f | recovery ord | recovery sph |\n|---|---|---|".split(
+            "\n"
+        )
+    )
     for f in PRUNE_FRACS:
         e = pr[f"f={f:.2f}"]["abs_recovery_mean"]
         lines.append(
@@ -882,9 +786,7 @@ def phase_report(per_seed: dict, stats_out: dict, args) -> None:
     lines.append(
         f"  - top-1 position capture (gradient ranking): ordinary={fmt(cap1_o)}, sphere={fmt(cap1_s)}"
     )
-    lines.append("")
-    lines.append("## Verdicts")
-    lines.append("")
+    lines.extend("\n## Verdicts\n".split("\n"))
     lines.append(
         f"- Performance parity (|Δacc| < 0.01): **{v['performance_parity']['holds']}** (diff = {fmt(v['performance_parity']['accuracy_diff'])})"
     )

@@ -1,24 +1,29 @@
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.stats import ci95_mean
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def ci95_mean(arr):
-    if len(arr) < 2:
-        return (np.nan, np.nan)
-    m = np.mean(arr)
-    se = np.std(arr, ddof=1) / np.sqrt(len(arr))
-    h = se * sp_stats.t.ppf(0.975, df=len(arr) - 1)
-    return (m - h, m + h)
-
-
-def fmt_ci(mean, ci, decimals=2):
-    lo, hi = ci
-    return f"${mean:.{decimals}f}\\,({lo:.{decimals}f},\\,{hi:.{decimals}f})$"
+def print_metric_row(mode, values, fields):
+    parts = [f"  {mode}"]
+    for column, label, decimals in fields:
+        arr = values[column].dropna().values if column in values else []
+        if len(arr):
+            lo, hi = ci95_mean(arr)
+            parts.append(
+                f"{label}={np.mean(arr):.{decimals}f} [{lo:.{decimals}f}, {hi:.{decimals}f}]"
+            )
+        else:
+            parts.append(f"{label}=--")
+    print(" & ".join(parts))
+    print()
 
 
 expA = ROOT / "results" / "expA"
@@ -70,20 +75,7 @@ for mode in ["B0", "BW", "BR"]:
     vals = sub[sub["mode"] == mode]
     if len(vals) == 0:
         continue
-    parts = [f"  {mode}"]
-    for col, label, dec in fields:
-        if col not in vals:
-            parts.append(f"{label}=--")
-            continue
-        arr = vals[col].dropna().values
-        if len(arr) == 0:
-            parts.append(f"{label}=--")
-            continue
-        m = np.mean(arr)
-        ci = ci95_mean(arr)
-        parts.append(f"{label}={m:.{dec}f} [{ci[0]:.{dec}f}, {ci[1]:.{dec}f}]")
-    print(" & ".join(parts))
-    print()
+    print_metric_row(mode, vals, fields)
 expB_hard = ROOT / "results" / "expB_hard"
 if (expB_hard / "metrics.csv").exists():
     hmetrics = pd.read_csv(expB_hard / "metrics.csv")
@@ -91,20 +83,7 @@ if (expB_hard / "metrics.csv").exists():
     print("=== ExpB_hard L=128, k=128 ===")
     for mode in sorted(hsub["mode"].unique()):
         vals = hsub[hsub["mode"] == mode]
-        parts = [f"  {mode}"]
-        for col, label, dec in fields:
-            if col not in vals:
-                parts.append(f"{label}=--")
-                continue
-            arr = vals[col].dropna().values
-            if len(arr) == 0:
-                parts.append(f"{label}=--")
-                continue
-            m = np.mean(arr)
-            ci = ci95_mean(arr)
-            parts.append(f"{label}={m:.{dec}f} [{ci[0]:.{dec}f}, {ci[1]:.{dec}f}]")
-        print(" & ".join(parts))
-        print()
+        print_metric_row(mode, vals, fields)
 print("=== Summary stats for text ===")
 for mode in ["B0", "BW", "BR"]:
     vals = sub[sub["mode"] == mode]

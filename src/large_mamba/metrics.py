@@ -24,7 +24,7 @@ def answer_token_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tenso
     )
 
 
-def answer_metrics(logits: torch.Tensor, labels: torch.Tensor) -> AnswerMetrics:
+def answer_tokens(logits: torch.Tensor, labels: torch.Tensor):
     shifted_logits, shifted_labels = (logits[:, :-1], labels[:, 1:])
     mask = shifted_labels.ne(-100)
     selected_logits = shifted_logits[mask]
@@ -36,6 +36,11 @@ def answer_metrics(logits: torch.Tensor, labels: torch.Tensor) -> AnswerMetrics:
     without_target = selected_logits.clone()
     without_target.scatter_(1, targets.unsqueeze(1), -torch.inf)
     margins = target_logits - without_target.max(dim=1).values
+    return selected_logits, targets, predictions, margins
+
+
+def answer_metrics(logits: torch.Tensor, labels: torch.Tensor) -> AnswerMetrics:
+    selected_logits, targets, predictions, margins = answer_tokens(logits, labels)
     return AnswerMetrics(
         exact_match=float(predictions.eq(targets).float().mean()),
         cross_entropy=float(F.cross_entropy(selected_logits, targets)),

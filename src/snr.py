@@ -8,6 +8,14 @@ import torch.nn.functional as F
 EPS = 1e-08
 
 
+def _float_tensor(value):
+    return (
+        value.detach().cpu().float()
+        if isinstance(value, torch.Tensor)
+        else torch.as_tensor(value, dtype=torch.float32)
+    )
+
+
 def mean_pairwise_corr(P: np.ndarray | torch.Tensor) -> float:
     if isinstance(P, torch.Tensor):
         P = P.detach().cpu().numpy()
@@ -39,14 +47,7 @@ def signal_noise_rho(
     max_coords: int | None = 64,
     probe_seed: int = 0,
 ) -> dict[str, float]:
-    if isinstance(p_clean, torch.Tensor):
-        p_clean = p_clean.detach().cpu().float()
-    else:
-        p_clean = torch.as_tensor(p_clean, dtype=torch.float32)
-    if isinstance(p_obs, torch.Tensor):
-        p_obs = p_obs.detach().cpu().float()
-    else:
-        p_obs = torch.as_tensor(p_obs, dtype=torch.float32)
+    p_clean, p_obs = _float_tensor(p_clean), _float_tensor(p_obs)
     p_noise = p_obs - p_clean
     m = p_clean.shape[1]
     if max_coords is not None and m > max_coords:
@@ -63,14 +64,7 @@ def signal_noise_rho(
 def effective_snr(
     p_clean: torch.Tensor | np.ndarray, p_obs: torch.Tensor | np.ndarray
 ) -> dict[str, float]:
-    if isinstance(p_clean, torch.Tensor):
-        p_clean = p_clean.detach().cpu().float()
-    else:
-        p_clean = torch.as_tensor(p_clean, dtype=torch.float32)
-    if isinstance(p_obs, torch.Tensor):
-        p_obs = p_obs.detach().cpu().float()
-    else:
-        p_obs = torch.as_tensor(p_obs, dtype=torch.float32)
+    p_clean, p_obs = _float_tensor(p_clean), _float_tensor(p_obs)
     p_noise = p_obs - p_clean
     signal_pow = (p_clean**2).sum(dim=1).clamp_min(1e-12)
     noise_pow = (p_noise**2).sum(dim=1).clamp_min(1e-12)
@@ -99,10 +93,7 @@ def variance_fraction(
         if not np.isfinite(X).all():
             return 0.0
         Xc = X - X.mean(axis=0, keepdims=True)
-        try:
-            U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
-        except np.linalg.LinAlgError:
-            return 0.0
+        S = np.linalg.svd(Xc, compute_uv=False)
         total_var = (S**2).sum()
         if total_var < 1e-12:
             return 0.0

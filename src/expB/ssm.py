@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.diagonal import initialize_layers
 from src.snr import hypersphere, row_normalize, row_normalize_
 
 VALID_MODES = (
@@ -59,35 +58,8 @@ class DiagonalSSM(nn.Module):
         else:
             self.pos_embed = None
         nn.init.normal_(self.embed.weight, std=0.02)
-        self.a_raw = nn.ParameterList()
-        self.B = nn.ParameterList()
-        self.C = nn.ParameterList()
-        self.layer_norm = nn.ModuleList()
-        self.out_proj = nn.ModuleList()
-        for _ in range(n_layers):
-            a = nn.Parameter(torch.zeros(k))
-            with torch.no_grad():
-                target = -math.log(0.995)
-                a.fill_(math.log(math.expm1(max(target, 0.0001))))
-            self.a_raw.append(a)
-            B = nn.Parameter(torch.empty(k, d_model))
-            C = nn.Parameter(torch.empty(d_model, k))
-            nn.init.xavier_uniform_(B)
-            nn.init.xavier_uniform_(C)
-            self.B.append(B)
-            self.C.append(C)
-            self.layer_norm.append(nn.LayerNorm(d_model))
-            self.out_proj.append(
-                nn.Sequential(
-                    nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, d_model)
-                )
-            )
-        self.head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, V),
-        )
+        initialize_layers(self, n_layers=n_layers, k=k, d_model=d_model, V=V)
+
         if mode in ("BW", "BW_BR"):
             self.row_normalize_weights_()
 
@@ -139,16 +111,6 @@ class DiagonalSSM(nn.Module):
         return_states: bool = False,
         return_h_norms: bool = False,
     ) -> dict[str, torch.Tensor]:
-        if input_ids.shape[1] >= 2 and int(input_ids[0, -1].item()) == self.V:
-            tokens = input_ids[:, :-1]
-        else:
-            tokens = (
-                input_ids[:, :-1]
-                if input_ids.shape[1] > 1 and input_ids[:, -1].max() >= self.V
-                else input_ids
-            )
-            if input_ids.shape[1] > 1 and (input_ids[:, -1] == self.V).all():
-                tokens = input_ids[:, :-1]
         if input_ids.size(1) > 1 and (input_ids[:, -1] == self.V).all():
             tokens = input_ids[:, :-1]
         else:

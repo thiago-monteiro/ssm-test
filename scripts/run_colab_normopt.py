@@ -14,21 +14,14 @@ import torch
 import torch.nn.functional as F
 from scipy import stats
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.classification import curriculum_length
 from src.expB.data import make_batch
 from src.expB.ssm import DiagonalSSM
 from src.normopt.normalize import project_weight_rows_, row_radial_fraction
 from src.normopt.optim import HybridOptimizer, MuonMomentum, TangentRowMomentum
 
-HAS_XLA = False
-try:
-    import torch_xla
-    import torch_xla.core.xla_model as xm
-
-    HAS_XLA = True
-except ImportError:
-    HAS_XLA = False
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def compute_spectral_metrics(matrix: torch.Tensor) -> tuple[float, float]:
@@ -52,7 +45,7 @@ def build_optimizer(model: DiagonalSSM, opt_name: str) -> torch.optim.Optimizer:
             continue
         if (
             p.ndim == 2
-            and any((k in name for k in ("out_proj", "head")))
+            and any(k in name for k in ("out_proj", "head"))
             and ("weight" in name)
         ):
             matrix_params.append(p)
@@ -61,15 +54,12 @@ def build_optimizer(model: DiagonalSSM, opt_name: str) -> torch.optim.Optimizer:
             rest_params.append(p)
     if opt_name == "adamw":
         return torch.optim.AdamW(model.parameters(), lr=0.002, weight_decay=0.01)
-    if opt_name == "muon":
-        m_opt = MuonMomentum(matrix_params, lr=0.02)
-        r_opt = torch.optim.AdamW(rest_params, lr=0.002, weight_decay=0.01)
-        return HybridOptimizer(m_opt, r_opt, names=matrix_names)
-    if opt_name == "rmo":
-        m_opt = TangentRowMomentum(matrix_params, lr=0.02)
-        r_opt = torch.optim.AdamW(rest_params, lr=0.002, weight_decay=0.01)
-        return HybridOptimizer(m_opt, r_opt, names=matrix_names)
-    raise ValueError(f"Unknown optimizer: {opt_name}")
+    matrix_optimizer = {"muon": MuonMomentum, "rmo": TangentRowMomentum}[opt_name]
+    return HybridOptimizer(
+        matrix_optimizer(matrix_params, lr=0.02),
+        torch.optim.AdamW(rest_params, lr=0.002, weight_decay=0.01),
+        names=matrix_names,
+    )
 
 
 def evaluate_model(
@@ -109,6 +99,10 @@ def run_single_experiment(
     device: torch.device,
     is_xla: bool = False,
 ) -> dict:
+    if is_xla:
+        import torch_xla
+        import torch_xla.core.xla_model as xm
+
     torch.manual_seed(seed)
     np.random.seed(seed)
     ssm_mode = (
@@ -125,12 +119,7 @@ def run_single_experiment(
     steps_to_50 = -1
     t0_all = time.perf_counter()
     for step in range(1, steps + 1):
-        if step < steps // 5:
-            L_step = max(8, L // 4)
-        elif step < steps // 2:
-            L_step = max(16, L // 2)
-        else:
-            L_step = L
+        L_step = curriculum_length(step, steps, L)
         batch = make_batch(batch_size, L=L_step, V=V, device=device)
         t_step = time.perf_counter()
         opt.zero_grad()
@@ -208,7 +197,9 @@ def main():
     parser.add_argument("--seeds", type=int, default=5)
     parser.add_argument("--L", type=int, default=32)
     parser.add_argument("--k", type=int, default=128)
-    parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--device", choices=("auto", "cpu", "cuda", "tpu", "xla"), default="auto"
+    )
     parser.add_argument("--out", default=str(ROOT / "results" / "colab_normopt"))
     args = parser.parse_args()
     out_dir = Path(args.out)
@@ -222,16 +213,12 @@ def main():
             or "TPU_ACCELERATOR_TYPE" in os.environ
         )
     ):
-        if HAS_XLA:
-            device = (
-                torch_xla.device() if hasattr(torch_xla, "device") else xm.xla_device()
-            )
-            is_xla = True
-            dev_name = f"TPU ({xm.xla_device_hw(device)})"
-        else:
-            print("Warning: torch_xla not found, falling back to CUDA/CPU.", flush=True)
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            dev_name = str(device)
+        import torch_xla
+        import torch_xla.core.xla_model as xm
+
+        device = torch_xla.device() if hasattr(torch_xla, "device") else xm.xla_device()
+        is_xla = True
+        dev_name = f"TPU ({xm.xla_device_hw(device)})"
     elif args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()):
         device = torch.device("cuda")
         dev_name = f"CUDA ({torch.cuda.get_device_name(0)})"
@@ -292,7 +279,7 @@ def main():
         .reset_index()
     )
     print("\n" + "=" * 90, flush=True)
-    print("STATISTICAL BENCHMARK SUMMARY (N={} seeds)".format(args.seeds), flush=True)
+    print(f"STATISTICAL BENCHMARK SUMMARY (N={args.seeds} seeds)", flush=True)
     print("=" * 90, flush=True)
     print(summary.to_string(index=False), flush=True)
     print("\n" + "=" * 90, flush=True)
@@ -328,14 +315,11 @@ def main():
             print(
                 f"  95% CI: [{ci95[0] * 100:+.2f}%, {ci95[1] * 100:+.2f}%]", flush=True
             )
-            try:
-                w_stat, p_val_w = stats.wilcoxon(m_rmo, m_muon)
-                print(
-                    f"  Wilcoxon signed-rank: W = {w_stat:.1f}, p-value = {p_val_w:.4f}",
-                    flush=True,
-                )
-            except Exception:
-                pass
+            w_stat, p_val_w = stats.wilcoxon(m_rmo, m_muon)
+            print(
+                f"  Wilcoxon signed-rank: W = {w_stat:.1f}, p-value = {p_val_w:.4f}",
+                flush=True,
+            )
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
     panel_specs = [
         ("val_acc", "Validation Accuracy", axes[0, 0]),

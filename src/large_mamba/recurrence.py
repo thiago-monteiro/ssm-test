@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -77,14 +77,9 @@ class ChunkedSelectiveScan(nn.Module):
         self.checkpoint_chunks = checkpoint_chunks
         chunk: nn.Module = _ScanChunk(self.condition, epsilon)
         if compile_chunks:
-            try:
-                from torch._dynamo import config as dynamo_config
+            from torch._dynamo import config as dynamo_config
 
-                dynamo_config.cache_size_limit = max(
-                    dynamo_config.cache_size_limit, 128
-                )
-            except (ImportError, AttributeError):
-                pass
+            dynamo_config.cache_size_limit = max(dynamo_config.cache_size_limit, 128)
             chunk = torch.compile(chunk, fullgraph=True, dynamic=False, mode="default")
         self.chunk = chunk
 

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 def run_parallel(
@@ -16,7 +17,4 @@ def run_parallel(
     n_workers = min(n_workers, len(tasks), os.cpu_count() or 4)
     ctx = mp.get_context("spawn")
     with ctx.Pool(n_workers) as pool:
-        results = []
-        for r in pool.imap_unordered(worker_fn, tasks):
-            results.append(r)
-    return results
+        return list(pool.imap_unordered(worker_fn, tasks))

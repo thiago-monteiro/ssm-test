@@ -11,4 +11,4 @@ dependencies:
   - gcc_linux-64
   - gxx_linux-64
   - pip:
-      - -r requirements.txt
+      - -r requirements-mamba.txt

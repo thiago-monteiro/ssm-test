@@ -4,11 +4,14 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.plotting import bar_metric, errorbar_metric, finish_figure
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def plot_expA(expA: Path) -> None:
@@ -25,21 +28,7 @@ def plot_expA(expA: Path) -> None:
     colors = {False: "#c0392b", True: "#2980b9"}
     labels = {False: "Standard", True: "Normalized"}
     ax = axes[0, 0]
-    for norm in (False, True):
-        sub = df[df["normalized"] == norm]
-        g = sub.groupby("quant_label", observed=True)["mse"]
-        mean = g.mean()
-        sem = g.sem()
-        x = np.arange(len(mean))
-        ax.errorbar(
-            x,
-            mean.values,
-            yerr=sem.values,
-            marker="o",
-            label=labels[norm],
-            color=colors[norm],
-            capsize=3,
-        )
+    errorbar_metric(ax, df, "mse", (False, True), colors, labels)
     ax.set_xticks(range(len(order)))
     ax.set_xticklabels(order, rotation=45)
     ax.set_xlabel("Quantization level")
@@ -68,21 +57,14 @@ def plot_expA(expA: Path) -> None:
         ax.grid(True, alpha=0.3)
     ax = axes[1, 0]
     if "snr_effective" in df.columns:
-        for norm in (False, True):
-            sub = df[(df["normalized"] == norm) & (df["quant_label"] != "fp32")]
-            g = sub.groupby("quant_label", observed=True)["snr_effective"]
-            mean = g.mean()
-            sem = g.sem()
-            x = np.arange(len(mean))
-            ax.errorbar(
-                x,
-                mean.values,
-                yerr=sem.values,
-                marker="o",
-                label=labels[norm],
-                color=colors[norm],
-                capsize=3,
-            )
+        errorbar_metric(
+            ax,
+            df[df["quant_label"] != "fp32"],
+            "snr_effective",
+            (False, True),
+            colors,
+            labels,
+        )
         ax.set_xticks(range(len(order) - 1))
         ax.set_xticklabels(order[1:], rotation=45)
         ax.set_xlabel("Quantization level")
@@ -92,22 +74,17 @@ def plot_expA(expA: Path) -> None:
         ax.grid(True, alpha=0.3)
     ax = axes[1, 1]
     if "mse_matched_noise" in df.columns:
-        for norm in (False, True):
-            sub = df[(df["normalized"] == norm) & (df["quant_label"] != "fp32")]
-            g = sub.groupby("quant_label", observed=True)["mse_matched_noise"]
-            mean = g.mean()
-            sem = g.sem()
-            x = np.arange(len(mean))
-            ax.errorbar(
-                x,
-                mean.values,
-                yerr=sem.values,
-                marker="s",
-                label=f"{labels[norm]} (matched)",
-                color=colors[norm],
-                capsize=3,
-                linestyle="--",
-            )
+        errorbar_metric(
+            ax,
+            df[df["quant_label"] != "fp32"],
+            "mse_matched_noise",
+            (False, True),
+            colors,
+            labels,
+            marker="s",
+            linestyle="--",
+            label_suffix=" (matched)",
+        )
         ax.set_xticks(range(len(order) - 1))
         ax.set_xticklabels(order[1:], rotation=45)
         ax.set_xlabel("Quantization level")
@@ -116,9 +93,7 @@ def plot_expA(expA: Path) -> None:
         ax.legend()
         ax.grid(True, alpha=0.3)
     fig.suptitle("Experiment A — Enhanced SNR + matched-noise suite", fontsize=14)
-    fig.tight_layout()
-    fig.savefig(expA / "mse_curves_enhanced.png", dpi=150)
-    plt.close(fig)
+    finish_figure(fig, expA / "mse_curves_enhanced.png")
     print(f"Wrote {expA / 'mse_curves_enhanced.png'}")
 
 
@@ -146,99 +121,30 @@ def plot_expB(expB: Path) -> None:
             "sphere_on_z": "#f39c12",
         }
         modes_list = [m for m in sub["mode"].unique() if m in colors]
-        ax = axes[0, 0]
-        means = [sub[sub["mode"] == m]["udepth"].mean() for m in modes_list]
-        sems = [sub[sub["mode"] == m]["udepth"].sem() for m in modes_list]
-        ax.bar(
-            modes_list,
-            means,
-            yerr=sems,
-            color=[colors.get(m, "#333") for m in modes_list],
-            capsize=4,
-        )
-        ax.set_title("U-shape depth")
-        ax.set_ylabel("UDepth")
-        ax.tick_params(axis="x", rotation=45)
-        ax = axes[0, 1]
-        means = [sub[sub["mode"] == m]["over_smoothing"].mean() for m in modes_list]
-        sems = [sub[sub["mode"] == m]["over_smoothing"].sem() for m in modes_list]
-        ax.bar(
-            modes_list,
-            means,
-            yerr=sems,
-            color=[colors.get(m, "#333") for m in modes_list],
-            capsize=4,
-        )
-        ax.set_title("Over-smoothing (raw h)")
-        ax.set_ylabel("Mean pairwise cosine")
-        ax.tick_params(axis="x", rotation=45)
-        ax = axes[0, 2]
-        if "decode_probe_acc" in sub.columns:
-            means = [
-                sub[sub["mode"] == m]["decode_probe_acc"].mean() for m in modes_list
-            ]
-            sems = [sub[sub["mode"] == m]["decode_probe_acc"].sem() for m in modes_list]
-            ax.bar(
+        panels = [
+            ("udepth", "U-shape depth", "UDepth", None),
+            ("over_smoothing", "Over-smoothing (raw h)", "Mean pairwise cosine", None),
+            ("decode_probe_acc", "Decode probe accuracy", "Probe acc", (0, 1.05)),
+            ("intervention_drop", "Intervention drop", "Acc drop", None),
+            (
+                "task_conditioned_os",
+                "Task-conditioned OS",
+                "Mean cosine (distinct)",
+                None,
+            ),
+            ("endpoint_acc", "Endpoint accuracy", "Accuracy", (0, 1.05)),
+        ]
+        for ax, (metric, title, ylabel, ylim) in zip(axes.flat, panels, strict=True):
+            bar_metric(
+                ax,
+                sub,
+                metric,
                 modes_list,
-                means,
-                yerr=sems,
-                color=[colors.get(m, "#333") for m in modes_list],
-                capsize=4,
+                colors,
+                title=title,
+                ylabel=ylabel,
+                ylim=ylim,
             )
-        ax.set_title("Decode probe accuracy")
-        ax.set_ylabel("Probe acc")
-        ax.set_ylim(0, 1.05)
-        ax.tick_params(axis="x", rotation=45)
-        ax = axes[1, 0]
-        if "intervention_drop" in sub.columns:
-            means = [
-                sub[sub["mode"] == m]["intervention_drop"].mean() for m in modes_list
-            ]
-            sems = [
-                sub[sub["mode"] == m]["intervention_drop"].sem() for m in modes_list
-            ]
-            ax.bar(
-                modes_list,
-                means,
-                yerr=sems,
-                color=[colors.get(m, "#333") for m in modes_list],
-                capsize=4,
-            )
-        ax.set_title("Intervention drop")
-        ax.set_ylabel("Acc drop")
-        ax.tick_params(axis="x", rotation=45)
-        ax = axes[1, 1]
-        if "task_conditioned_os" in sub.columns:
-            means = [
-                sub[sub["mode"] == m]["task_conditioned_os"].mean() for m in modes_list
-            ]
-            sems = [
-                sub[sub["mode"] == m]["task_conditioned_os"].sem() for m in modes_list
-            ]
-            ax.bar(
-                modes_list,
-                means,
-                yerr=sems,
-                color=[colors.get(m, "#333") for m in modes_list],
-                capsize=4,
-            )
-        ax.set_title("Task-conditioned OS")
-        ax.set_ylabel("Mean cosine (distinct)")
-        ax.tick_params(axis="x", rotation=45)
-        ax = axes[1, 2]
-        means = [sub[sub["mode"] == m]["endpoint_acc"].mean() for m in modes_list]
-        sems = [sub[sub["mode"] == m]["endpoint_acc"].sem() for m in modes_list]
-        ax.bar(
-            modes_list,
-            means,
-            yerr=sems,
-            color=[colors.get(m, "#333") for m in modes_list],
-            capsize=4,
-        )
-        ax.set_title("Endpoint accuracy")
-        ax.set_ylabel("Accuracy")
-        ax.set_ylim(0, 1.05)
-        ax.tick_params(axis="x", rotation=45)
         b0_endpoint = (
             sub[sub["mode"] == "B0"]["endpoint_acc"].mean()
             if "B0" in sub["mode"].values
@@ -254,9 +160,7 @@ def plot_expB(expB: Path) -> None:
             )
             ax.legend(fontsize=8)
         fig.suptitle(f"Exp B metrics — {gl} (L={L}, k={k})", fontsize=14)
-        fig.tight_layout()
-        fig.savefig(expB / f"metrics_{gl}_L{L}_k{k}.png", dpi=150)
-        plt.close(fig)
+        finish_figure(fig, expB / f"metrics_{gl}_L{L}_k{k}.png")
         print(f"Wrote {expB / f'metrics_{gl}_L{L}_k{k}.png'}")
     fig, ax = plt.subplots(figsize=(7, 4))
     for mode in df["mode"].unique():
@@ -267,9 +171,7 @@ def plot_expB(expB: Path) -> None:
     ax.set_ylabel("Count (seeds)")
     ax.set_title("Learned decay (mean τ per seed)")
     ax.legend()
-    fig.tight_layout()
-    fig.savefig(expB / "decay_histograms.png", dpi=150)
-    plt.close(fig)
+    finish_figure(fig, expB / "decay_histograms.png")
 
 
 def main() -> None:

@@ -3,9 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
+from src.classification import classification_step, curriculum_length
 from src.expC.data import make_copy_batch
 from src.expC.model import CopySSM
 from src.seed import seed_everything
@@ -40,21 +39,9 @@ def train_copy_ssm(
     model.train()
     final_acc: float | None = None
     for step in range(1, steps + 1):
-        if step < steps // 5:
-            L_step = max(max(8, L // 4), delay + 3)
-        elif step < steps // 2:
-            L_step = max(max(16, L // 2), delay + 3)
-        else:
-            L_step = L
+        L_step = curriculum_length(step, steps, L, delay=delay)
         batch = make_copy_batch(batch_size, L_step, V=V, delay=delay, device=device)
-        out = model(batch["input_ids"], batch["query_pos"])
-        loss = F.cross_entropy(out["logits"], batch["target"])
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        if grad_clip is not None:
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        opt.step()
-        sched.step()
+        out, loss = classification_step(model, batch, opt, sched, grad_clip)
         if log_every and step % log_every == 0:
             with torch.no_grad():
                 acc = (

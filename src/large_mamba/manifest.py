@@ -33,9 +33,7 @@ def environment_manifest(repository_commit: str | None = None) -> dict[str, obje
                 "mamba-ssm",
                 "causal-conv1d",
                 "triton",
-                "peft",
                 "transformers",
-                "datasets",
             )
         ),
     }

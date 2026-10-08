@@ -5,6 +5,8 @@ from dataclasses import dataclass, replace
 
 import torch
 
+from .normalize import tangentialize
+
 EPS = 1e-08
 OPTIMIZER_NAMES = ("sgdm", "adamw", "muon", "rmo", "gtmuon")
 SPECTRAL_NAMES = ("muon", "rmo")
@@ -31,6 +33,18 @@ def zeropower_via_newtonschulz5(
     if transposed:
         X = X.T
     return X.to(G.dtype)
+
+
+def _momentum_update(g, group, state, update_state):
+    momentum = group["momentum"]
+    buf = state.get("momentum_buffer")
+    if buf is None:
+        buf = state["momentum_buffer"] = torch.zeros_like(g)
+    new_buf = buf.mul(momentum).add_(g)
+    if update_state:
+        state["momentum_buffer"] = new_buf
+    raw = g.add(new_buf, alpha=momentum) if group["nesterov"] else new_buf.clone()
+    return raw
 
 
 class MatrixUpdateRule(torch.optim.Optimizer):
@@ -94,15 +108,7 @@ class MuonMomentum(MatrixUpdateRule):
         g = p.grad
         assert g is not None
         group = self.param_groups[0]
-        momentum = group["momentum"]
-        state = self.state[p]
-        buf = state.get("momentum_buffer")
-        if buf is None:
-            buf = state["momentum_buffer"] = torch.zeros_like(g)
-        new_buf = buf.mul(momentum).add_(g)
-        if update_state:
-            state["momentum_buffer"] = new_buf
-        raw = g.add(new_buf, alpha=momentum) if group["nesterov"] else new_buf.clone()
+        raw = _momentum_update(g, group, self.state[p], update_state)
         ortho = zeropower_via_newtonschulz5(
             raw, steps=int(group["ns_steps"]), dtype=self.ns_dtype
         )
@@ -135,7 +141,7 @@ class OptimizerSpec:
         use_bf16 = self.ns_dtype == "auto" and device.type == "cuda"
         return torch.bfloat16 if use_bf16 else torch.float32
 
-    def with_lr(self, lr: float) -> "OptimizerSpec":
+    def with_lr(self, lr: float) -> OptimizerSpec:
         return replace(self, lr=lr)
 
 
@@ -228,19 +234,9 @@ class TangentRowMomentum(MatrixUpdateRule):
         g = p.grad
         assert g is not None
         group = self.param_groups[0]
-        momentum = group["momentum"]
-        state = self.state[p]
-        buf = state.get("momentum_buffer")
-        if buf is None:
-            buf = state["momentum_buffer"] = torch.zeros_like(g)
-        new_buf = buf.mul(momentum).add_(g)
-        if update_state:
-            state["momentum_buffer"] = new_buf
-        raw = g.add(new_buf, alpha=momentum) if group["nesterov"] else new_buf.clone()
+        raw = _momentum_update(g, group, self.state[p], update_state)
         if group["tangential"]:
-            w = p.detach()
-            w_hat = w / (w.norm(dim=1, keepdim=True) + EPS)
-            raw = raw - (raw * w_hat).sum(dim=1, keepdim=True) * w_hat
+            raw = tangentialize(raw, p.detach())
         if group["unit_rows"]:
             raw = raw / (raw.norm(dim=1, keepdim=True) + EPS)
         return raw
@@ -284,22 +280,13 @@ class GraftedTangentMuon(MatrixUpdateRule):
         g = p.grad
         assert g is not None
         group = self.param_groups[0]
-        momentum = group["momentum"]
         state = self.state[p]
-        buf = state.get("momentum_buffer")
-        if buf is None:
-            buf = state["momentum_buffer"] = torch.zeros_like(g)
-        new_buf = buf.mul(momentum).add_(g)
-        if update_state:
-            state["momentum_buffer"] = new_buf
-        raw = g.add(new_buf, alpha=momentum) if group["nesterov"] else new_buf.clone()
+        raw = _momentum_update(g, group, state, update_state)
         ortho = zeropower_via_newtonschulz5(
             raw, steps=int(group["ns_steps"]), dtype=self.ns_dtype
         )
         if group["tangential"]:
-            w = p.detach()
-            w_hat = w / (w.norm(dim=1, keepdim=True) + EPS)
-            ortho = ortho - (ortho * w_hat).sum(dim=1, keepdim=True) * w_hat
+            ortho = tangentialize(ortho, p.detach())
         m = state.get("adam_m")
         v = state.get("adam_v")
         if m is None:

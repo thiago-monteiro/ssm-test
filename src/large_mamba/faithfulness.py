@@ -41,37 +41,18 @@ def summarize_faithfulness_rows(rows: list[dict[str, object]]) -> dict[str, obje
         raise ValueError("faithfulness summary needs at least one perturbation")
     examples = sorted({int(row["example_index"]) for row in rows})
     directions = sorted({int(row["direction_index"]) for row in rows})
-    predicted = torch.tensor(
-        [
+    indexed = {
+        (int(row["example_index"]), int(row["direction_index"])): row
+        for row in reversed(rows)
+    }
+    predicted, actual = (
+        torch.tensor(
             [
-                next(
-                    (
-                        float(row["predicted_effect"])
-                        for row in rows
-                        if int(row["example_index"]) == example
-                        and int(row["direction_index"]) == direction
-                    )
-                )
-                for direction in directions
+                [float(indexed[example, direction][field]) for direction in directions]
+                for example in examples
             ]
-            for example in examples
-        ]
-    )
-    actual = torch.tensor(
-        [
-            [
-                next(
-                    (
-                        float(row["actual_effect"])
-                        for row in rows
-                        if int(row["example_index"]) == example
-                        and int(row["direction_index"]) == direction
-                    )
-                )
-                for direction in directions
-            ]
-            for example in examples
-        ]
+        )
+        for field in ("predicted_effect", "actual_effect")
     )
     metrics = faithfulness_metrics(predicted, actual)
     return {
@@ -85,11 +66,11 @@ def summarize_faithfulness_rows(rows: list[dict[str, object]]) -> dict[str, obje
         "false_positive_rate": metrics.false_positive_rate,
         "false_negative_rate": metrics.false_negative_rate,
         "clean_first_answer_accuracy": sum(
-            (bool(row["clean_correct"]) for row in rows[:: len(directions)])
+            bool(row["clean_correct"]) for row in rows[:: len(directions)]
         )
         / len(examples),
         "mean_state_norm": sum(
-            (float(row["state_norm"]) for row in rows[:: len(directions)])
+            float(row["state_norm"]) for row in rows[:: len(directions)]
         )
         / len(examples),
     }

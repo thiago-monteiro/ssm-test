@@ -26,6 +26,14 @@ class FaithResult:
     margins_clean: list[float] = field(default_factory=list)
     correct: list[bool] = field(default_factory=list)
 
+    def add_effects(self, theta, predicted, actual):
+        for values, effect in ((self.dS_pred, predicted), (self.dS_act, actual)):
+            values[theta] = (
+                np.concatenate([values[theta], effect])
+                if theta in values
+                else effect.copy()
+            )
+
     def metrics(self, theta: float) -> dict[str, float]:
         p = self.dS_pred[theta]
         a = self.dS_act[theta]
@@ -100,6 +108,24 @@ class FaithfulnessEvaluator:
         self.model = model.to(device).eval()
         self.device = torch.device(device)
 
+    def _effects(self, result, state, gradient, directions, thetas, score, clean_score):
+        for theta in thetas:
+            if self.model.sphere:
+                tangent = _tangent_project(directions.to(self.device), state)
+                perturbed = (
+                    math.cos(theta) * state.unsqueeze(0).expand_as(tangent)
+                    + math.sin(theta) * tangent
+                )
+                displacement = (perturbed - state.unsqueeze(0)).cpu()
+            else:
+                scaled = theta * float(state.norm().item()) * directions.to(self.device)
+                perturbed = state.unsqueeze(0).expand_as(scaled) + scaled
+                displacement = scaled.cpu()
+            predicted = (displacement @ gradient.cpu()).numpy()
+            with torch.no_grad():
+                actual = score(perturbed).cpu().numpy() - clean_score
+            result.add_effects(theta, predicted, actual)
+
     def eval_final_state(
         self,
         n_seq: int,
@@ -150,35 +176,14 @@ class FaithfulnessEvaluator:
                 dirs_list.append(torch.eye(k, device=self.device))
             dirs_list.append(_unit_random(n_random_dirs, k, gen, self.device).cpu())
             U = torch.cat(dirs_list, dim=0)
-            for theta in thetas:
-                if model.sphere:
-                    Ut = _tangent_project(U.to(self.device), h_q)
-                    Hp = (
-                        math.cos(theta) * h_q.unsqueeze(0).expand_as(Ut)
-                        + math.sin(theta) * Ut
-                    )
-                    delta = (Hp - h_q.unsqueeze(0)).cpu()
-                else:
-                    R = float(h_q.norm().item())
-                    U_d = U.to(self.device)
-                    Hp = h_q.unsqueeze(0).expand_as(U_d) + theta * R * U_d
-                    delta = (theta * R * U_d).cpu()
-                dS_pred = (delta @ g_tan.cpu()).numpy()
-                with torch.no_grad():
-                    lp2 = model.logits_from_final_state(
-                        Hp, x_q.unsqueeze(0).expand(len(Hp), -1)
-                    )
-                S_act = (lp2[:, target] - lp2[:, alt]).cpu().numpy() - S_clean
-                res.dS_pred[theta] = (
-                    np.concatenate([res.dS_pred.get(theta, []), dS_pred])
-                    if theta in res.dS_pred
-                    else dS_pred.copy()
+
+            def score(states):
+                logits = model.logits_from_final_state(
+                    states, x_q.unsqueeze(0).expand(len(states), -1)
                 )
-                res.dS_act[theta] = (
-                    np.concatenate([res.dS_act.get(theta, []), S_act])
-                    if theta in res.dS_act
-                    else S_act.copy()
-                )
+                return logits[:, target] - logits[:, alt]
+
+            self._effects(res, h_q, g_tan, U, thetas, score, S_clean)
         return res
 
     def eval_mid_state(
@@ -258,36 +263,15 @@ class FaithfulnessEvaluator:
                 else:
                     g_tan = g
                 U = _unit_random(n_random_dirs, model.k, gen, self.device).cpu()
-                for theta in thetas:
-                    if model.sphere:
-                        Ut = _tangent_project(U.to(self.device), h_mid)
-                        Hp = (
-                            math.cos(theta) * h_mid.unsqueeze(0).expand_as(Ut)
-                            + math.sin(theta) * Ut
-                        )
-                        delta = (Hp - h_mid.unsqueeze(0)).cpu()
-                    else:
-                        R = float(h_mid.norm().item())
-                        U_d = U.to(self.device)
-                        Hp = h_mid.unsqueeze(0).expand_as(U_d) + theta * R * U_d
-                        delta = (theta * R * U_d).cpu()
-                    dS_pred = (delta @ g_tan.cpu()).numpy()
-                    with torch.no_grad():
-                        hq2 = model.tail_scan_to_q(x1_row, t0, Hp, q)
-                        lp2 = model.logits_from_final_state(
-                            hq2, x_q.unsqueeze(0).expand(len(Hp), -1)
-                        )
-                    S_act = (lp2[:, target] - lp2[:, alt]).cpu().numpy() - S_clean
-                    res.dS_pred[theta] = (
-                        np.concatenate([res.dS_pred.get(theta, []), dS_pred])
-                        if theta in res.dS_pred
-                        else dS_pred.copy()
+
+                def score(states):
+                    final = model.tail_scan_to_q(x1_row, t0, states, q)
+                    logits = model.logits_from_final_state(
+                        final, x_q.unsqueeze(0).expand(len(states), -1)
                     )
-                    res.dS_act[theta] = (
-                        np.concatenate([res.dS_act.get(theta, []), S_act])
-                        if theta in res.dS_act
-                        else S_act.copy()
-                    )
+                    return logits[:, target] - logits[:, alt]
+
+                self._effects(res, h_mid, g_tan, U, thetas, score, S_clean)
         return results
 
 

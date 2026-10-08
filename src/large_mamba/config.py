@@ -156,7 +156,7 @@ def choose_layer_scope(
     if n_layers == 64:
         return fallback_layers
     count = min(8, n_layers)
-    return tuple((round((i + 1) * n_layers / count) - 1 for i in range(count)))
+    return tuple(round((i + 1) * n_layers / count) - 1 for i in range(count))
 
 
 def projection_strength(

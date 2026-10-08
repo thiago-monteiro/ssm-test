@@ -37,7 +37,7 @@ def build_optimizer(
         ],
         weight_decay=config.training.weight_decay,
         fused=bool(all_trainable)
-        and all((parameter.device.type == "cuda" for parameter in all_trainable)),
+        and all(parameter.device.type == "cuda" for parameter in all_trainable),
     )
 
 
@@ -81,14 +81,15 @@ def run_training(
     optimizer.zero_grad(set_to_none=True)
     if 0 in config.training.checkpoint_steps:
         torch.save(trainable_state_dict(model), output_dir / "checkpoint-0.pt")
-    hash_file = hash_path.open("w")
-    progress = tqdm(
-        range(config.training.optimizer_steps),
-        desc=f"train {condition} seed={seed}",
-        unit="step",
-        dynamic_ncols=True,
-    )
-    try:
+    with (
+        hash_path.open("w") as hash_file,
+        tqdm(
+            range(config.training.optimizer_steps),
+            desc=f"train {condition} seed={seed}",
+            unit="step",
+            dynamic_ncols=True,
+        ) as progress,
+    ):
         for step in progress:
             if condition is Condition.SPHERE:
                 set_projection_strength(
@@ -167,9 +168,6 @@ def run_training(
                 tok_s=f"{tokens_done / step_elapsed:.0f}",
                 vram=f"{peak_gib:.1f}G",
             )
-    finally:
-        progress.close()
-        hash_file.close()
     elapsed = time.perf_counter() - start
     peak_allocated = (
         torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0

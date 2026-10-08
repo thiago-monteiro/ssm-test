@@ -81,17 +81,6 @@ class CheckpointedBlock(nn.Module):
                 inference_params=inference_params,
                 **mixer_kwargs,
             )
-        if residual is None:
-
-            def run_without_residual(hidden):
-                return self.base(hidden, None, inference_params=None, **mixer_kwargs)
-
-            return checkpoint(
-                run_without_residual,
-                hidden_states,
-                use_reentrant=False,
-                preserve_rng_state=False,
-            )
 
         def run(hidden, saved_residual):
             return self.base(
@@ -109,12 +98,7 @@ class CheckpointedBlock(nn.Module):
 def enable_activation_checkpointing(model: nn.Module) -> None:
     from .adapter import ProjectedMambaMixer
 
-    try:
-        layers = model.backbone.layers
-    except AttributeError as exc:
-        raise TypeError(
-            "expected an official MambaLMHeadModel with backbone.layers"
-        ) from exc
+    layers = model.backbone.layers
     for index, layer in enumerate(layers):
         if not isinstance(layer, CheckpointedBlock):
             mixer = getattr(layer, "mixer", None)
@@ -176,15 +160,15 @@ def parameter_manifest(model: nn.Module) -> ParameterManifest:
     ]
     rows.sort(key=lambda row: row[0])
     return ParameterManifest(
-        names=tuple((row[0] for row in rows)),
-        shapes=tuple((row[1] for row in rows)),
-        count=sum((row[2] for row in rows)),
+        names=tuple(row[0] for row in rows),
+        shapes=tuple(row[1] for row in rows),
+        count=sum(row[2] for row in rows),
     )
 
 
 def assert_parameter_parity(*models: nn.Module) -> None:
     manifests = [parameter_manifest(model) for model in models]
-    if any((manifest != manifests[0] for manifest in manifests[1:])):
+    if any(manifest != manifests[0] for manifest in manifests[1:]):
         raise AssertionError(
             "trainable parameter names, shapes, or counts differ across conditions"
         )
@@ -209,7 +193,7 @@ def initial_parameter_hashes(model: nn.Module) -> dict[str, str]:
 
 def assert_initial_tensor_parity(*models: nn.Module) -> None:
     hashes = [initial_parameter_hashes(model) for model in models]
-    if any((item != hashes[0] for item in hashes[1:])):
+    if any(item != hashes[0] for item in hashes[1:]):
         raise AssertionError(
             "initial trainable tensors differ across paired conditions"
         )
@@ -225,7 +209,7 @@ def trainable_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
 
 def load_trainable_checkpoint(model: nn.Module, checkpoint: str | Path) -> None:
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    if not isinstance(state, dict) or not all((isinstance(key, str) for key in state)):
+    if not isinstance(state, dict) or not all(isinstance(key, str) for key in state):
         raise TypeError("checkpoint must contain a tensor state dictionary")
     expected = {
         name for name, parameter in model.named_parameters() if parameter.requires_grad
@@ -251,13 +235,9 @@ def load_official_model(
     dtype: torch.dtype = torch.bfloat16,
     device: str | torch.device = "cuda",
 ) -> tuple[nn.Module, str]:
-    try:
-        from huggingface_hub import snapshot_download
-        from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
-    except ImportError as exc:
-        raise RuntimeError(
-            "install requirements.txt before loading the checkpoint"
-        ) from exc
+    from huggingface_hub import snapshot_download
+    from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
+
     snapshot = snapshot_download(repository, revision=revision)
     model = MambaLMHeadModel.from_pretrained(snapshot, device=device, dtype=dtype)
     return (model, snapshot)

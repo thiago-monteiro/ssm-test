@@ -48,9 +48,9 @@ def iter_weight_row_targets(
         weight = module.weight
         if weight.ndim != 2 or not weight.requires_grad:
             continue
-        if any((key in name for key in ALWAYS_EXCLUDED_KEYS)):
+        if any(key in name for key in ALWAYS_EXCLUDED_KEYS):
             continue
-        if not include_head and any((key in name for key in HEAD_KEYS)):
+        if not include_head and any(key in name for key in HEAD_KEYS):
             continue
         targets.append((name + ".weight", weight))
     return targets

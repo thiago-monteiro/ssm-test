@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
-from typing import Iterable, Protocol
+from typing import Protocol
 
 import numpy as np
 import torch
@@ -33,7 +34,7 @@ class TokenPools:
         if queries > associations:
             raise ValueError("queries cannot exceed associations")
         groups = [set(self.keys), set(self.values), set(self.distractors)]
-        if any((groups[i] & groups[j] for i in range(3) for j in range(i + 1, 3))):
+        if any(groups[i] & groups[j] for i in range(3) for j in range(i + 1, 3)):
             raise ValueError("key, value, and distractor pools must be disjoint")
         if self.association_marker == self.query_marker:
             raise ValueError("association and query markers must differ")
@@ -41,7 +42,7 @@ class TokenPools:
     @classmethod
     def from_tokenizer(
         cls, tokenizer: TokenizerLike, pool_size: int = 512
-    ) -> "TokenPools":
+    ) -> TokenPools:
         stable: list[int] = []
         for token_id in sorted(set(tokenizer.get_vocab().values())):
             text = tokenizer.decode([token_id])
@@ -218,7 +219,7 @@ def assert_disjoint_manifests(
 
 def manifest_jsonl(examples: Iterable[RecallExample]) -> str:
     return "".join(
-        (json.dumps(item.manifest(), sort_keys=True) + "\n" for item in examples)
+        json.dumps(item.manifest(), sort_keys=True) + "\n" for item in examples
     )
 
 
@@ -243,7 +244,7 @@ class RecallBatchFactory:
         self.sequence_length = sequence_length
         self.associations = associations
         self.queries = queries
-        if not micro_batch_sizes or any((size <= 0 for size in micro_batch_sizes)):
+        if not micro_batch_sizes or any(size <= 0 for size in micro_batch_sizes):
             raise ValueError("micro_batch_sizes must contain positive batch sizes")
         self.micro_batch_sizes = micro_batch_sizes
 

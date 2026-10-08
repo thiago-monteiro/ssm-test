@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Callable
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
@@ -34,6 +33,20 @@ def _causal_convolution(
     return mixer.act(mixer.conv1d(inputs)[..., :length])
 
 
+def _scan_inputs(mixer: nn.Module, hidden_states: torch.Tensor):
+    batch, length, _ = hidden_states.shape
+    xz = mixer.in_proj(hidden_states).transpose(1, 2)
+    x, z = xz.chunk(2, dim=1)
+    x = _causal_convolution(mixer, x, length)
+    x_dbl = mixer.x_proj(x.transpose(1, 2).reshape(batch * length, -1))
+    dt, B, C = torch.split(x_dbl, [mixer.dt_rank, mixer.d_state, mixer.d_state], dim=-1)
+    dt = _linear_without_bias(mixer.dt_proj, dt)
+    dt = dt.reshape(batch, length, mixer.d_inner).transpose(1, 2).contiguous()
+    B = B.reshape(batch, length, mixer.d_state).transpose(1, 2).contiguous()
+    C = C.reshape(batch, length, mixer.d_state).transpose(1, 2).contiguous()
+    return x, z, dt, B, C
+
+
 class FusedScanMambaMixer(nn.Module):
     def __init__(self, base_mixer: nn.Module) -> None:
         super().__init__()
@@ -50,19 +63,8 @@ class FusedScanMambaMixer(nn.Module):
             raise NotImplementedError("training mixer expects full sequences")
         from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
 
-        batch, length, _ = hidden_states.shape
         mixer = self.base
-        xz = mixer.in_proj(hidden_states).transpose(1, 2)
-        x, z = xz.chunk(2, dim=1)
-        x = _causal_convolution(mixer, x, length)
-        x_dbl = mixer.x_proj(x.transpose(1, 2).reshape(batch * length, -1))
-        dt, B, C = torch.split(
-            x_dbl, [mixer.dt_rank, mixer.d_state, mixer.d_state], dim=-1
-        )
-        dt = _linear_without_bias(mixer.dt_proj, dt)
-        dt = dt.reshape(batch, length, mixer.d_inner).transpose(1, 2).contiguous()
-        B = B.reshape(batch, length, mixer.d_state).transpose(1, 2).contiguous()
-        C = C.reshape(batch, length, mixer.d_state).transpose(1, 2).contiguous()
+        x, z, dt, B, C = _scan_inputs(mixer, hidden_states)
         y = selective_scan_fn(
             x,
             dt,
@@ -144,19 +146,8 @@ class ProjectedMambaMixer(nn.Module):
             raise NotImplementedError(
                 "instrumented layers require full-sequence reference recurrence"
             )
-        batch, length, _ = hidden_states.shape
         mixer = self.base
-        xz = mixer.in_proj(hidden_states).transpose(1, 2)
-        x, z = xz.chunk(2, dim=1)
-        x = _causal_convolution(mixer, x, length)
-        x_dbl = mixer.x_proj(x.transpose(1, 2).reshape(batch * length, -1))
-        dt, B, C = torch.split(
-            x_dbl, [mixer.dt_rank, mixer.d_state, mixer.d_state], dim=-1
-        )
-        dt = _linear_without_bias(mixer.dt_proj, dt)
-        dt = dt.reshape(batch, length, mixer.d_inner).transpose(1, 2).contiguous()
-        B = B.reshape(batch, length, mixer.d_state).transpose(1, 2).contiguous()
-        C = C.reshape(batch, length, mixer.d_state).transpose(1, 2).contiguous()
+        x, z, dt, B, C = _scan_inputs(mixer, hidden_states)
         A = -torch.exp(mixer.A_log.float())
         use_reference = (
             self.capture_states
@@ -219,12 +210,7 @@ def instrument_model(
     compile_scan: bool = False,
     checkpoint_scan_chunks: bool = False,
 ) -> list[ProjectedMambaMixer]:
-    try:
-        layers = model.backbone.layers
-    except AttributeError as exc:
-        raise TypeError(
-            "expected an official MambaLMHeadModel with backbone.layers"
-        ) from exc
+    layers = model.backbone.layers
     adapters: list[ProjectedMambaMixer] = []
     for index in layer_indices:
         if index not in radii:
@@ -248,12 +234,7 @@ def instrument_model(
 def make_remaining_mixers_lora_compatible(
     model: nn.Module,
 ) -> list[FusedScanMambaMixer]:
-    try:
-        layers = model.backbone.layers
-    except AttributeError as exc:
-        raise TypeError(
-            "expected an official MambaLMHeadModel with backbone.layers"
-        ) from exc
+    layers = model.backbone.layers
     wrappers: list[FusedScanMambaMixer] = []
     for layer in layers:
         if isinstance(layer.mixer, ProjectedMambaMixer):
