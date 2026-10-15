@@ -32,6 +32,7 @@ def train_ae(
     log_every: int = 500,
     sphere_on_z_only: bool = False,
     probe_width: int | None = None,
+    latent_sphere: bool = True,
 ) -> tuple[Autoencoder, dict[str, Any]]:
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -44,6 +45,7 @@ def train_ae(
         normalized=normalized,
         sphere_on_z_only=sphere_on_z_only,
         probe_width=probe_width,
+        latent_sphere=latent_sphere,
     ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     history: list[float] = []

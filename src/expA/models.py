@@ -17,6 +17,7 @@ class Autoencoder(nn.Module):
         sphere_on_z_only: bool = False,
         probe_width: int | None = None,
         n_classes: int = 64,
+        latent_sphere: bool = True,
     ):
         super().__init__()
         self.d = d
@@ -24,6 +25,7 @@ class Autoencoder(nn.Module):
         self.h = h
         self.normalized = normalized
         self.sphere_on_z_only = sphere_on_z_only
+        self.latent_sphere = latent_sphere
         self.enc1 = nn.Linear(d, h)
         self.enc2 = nn.Linear(h, k)
         self.dec1 = nn.Linear(k, h)
@@ -45,7 +47,7 @@ class Autoencoder(nn.Module):
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         z = self.enc2(self.act(self.enc1(x)))
-        if self.normalized:
+        if self.normalized and self.latent_sphere:
             z = hypersphere(z, dim=-1)
         return z
 

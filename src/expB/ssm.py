@@ -12,6 +12,7 @@ VALID_MODES = (
     "BW",
     "BR",
     "BX",
+    "BX_iso",
     "BW_BR",
     "B0_noshort",
     "BR_noshort",
@@ -100,7 +101,7 @@ class DiagonalSSM(nn.Module):
         A = self.A_bar(layer)
         Bu = F.linear(x_step, self.B[layer])
         h = A.view(1, -1) * h_prev + Bu
-        if self.mode == "BX":
+        if self.mode in ("BX", "BX_iso"):
             h = hypersphere(h, dim=-1)
         return h
 
@@ -130,11 +131,12 @@ class DiagonalSSM(nn.Module):
             Bu = F.linear(self.layer_norm[i](x), self.B[i])
             if self.mode == "sphere_on_z":
                 Bu = hypersphere(Bu, dim=-1)
-            if self.mode == "BX":
+            if self.mode in ("BX", "BX_iso"):
                 h_steps = []
                 h_prev = torch.zeros(Bsz, self.k, device=device)
+                x_in = x if self.mode == "BX" else self.layer_norm[i](x)
                 for t in range(L):
-                    h_prev = self._state_step(h_prev, x[:, t, :], i)
+                    h_prev = self._state_step(h_prev, x_in[:, t, :], i)
                     h_steps.append(h_prev.unsqueeze(1))
                     h_norms.append(h_prev.norm(dim=-1, keepdim=True))
                 h = torch.cat(h_steps, dim=1)
